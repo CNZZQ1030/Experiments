@@ -1,6 +1,6 @@
 """
 utils/metrics.py
-评估指标模块（包含PCC）/ Evaluation Metrics Module (including PCC)
+评估指标模块（只关注客户端本地性能）/ Evaluation Metrics Module (Focus on Client Local Performance)
 """
 
 import numpy as np
@@ -14,28 +14,33 @@ from datetime import datetime
 class MetricsCalculator:
     """
     指标计算器 / Metrics Calculator
-    包含测试准确率、时间消耗和皮尔逊相关系数(PCC)
-    Including test accuracy, time consumption and Pearson Correlation Coefficient (PCC)
+    专注于客户端本地测试集上的性能评估
+    Focus on client performance evaluation on local test sets
     """
     
     def __init__(self):
         """初始化指标计算器 / Initialize metrics calculator"""
         # 性能指标 / Performance metrics
         self.round_metrics = []  # 存储每轮指标
-        self.test_accuracies = []  # 测试准确率历史
-        self.test_losses = []  # 测试损失历史
         self.time_consumptions = []  # 时间消耗历史
         
+        # 客户端准确率追踪 / Client accuracy tracking
+        self.client_accuracies_per_round = []  # 每轮所有客户端的准确率
+        self.avg_client_accuracies = []  # 每轮客户端平均准确率
+        self.max_client_accuracies = []  # 每轮客户端最高准确率
+        self.min_client_accuracies = []  # 每轮客户端最低准确率
+        
         # PCC相关数据 / PCC related data
-        self.standalone_accuracies = {}  # 客户端独立训练准确率
-        self.federated_accuracies = {}   # 客户端联邦学习准确率
+        self.standalone_accuracies = {}  # 客户端独立训练准确率（在本地测试集上）
+        self.federated_accuracies = {}   # 客户端联邦学习准确率（在本地测试集上）
         
         # 贡献度数据 / Contribution data
         self.contribution_history = []
-        
+    
     def record_standalone_accuracy(self, client_id: int, accuracy: float) -> None:
         """
-        记录客户端独立训练准确率 / Record client standalone training accuracy
+        记录客户端独立训练准确率（在本地测试集上）
+        Record client standalone training accuracy (on local test set)
         
         Args:
             client_id: 客户端ID / Client ID
@@ -45,7 +50,8 @@ class MetricsCalculator:
     
     def record_federated_accuracy(self, client_id: int, accuracy: float) -> None:
         """
-        记录客户端联邦学习准确率 / Record client federated learning accuracy
+        记录客户端联邦学习准确率（在本地测试集上）
+        Record client federated learning accuracy (on local test set)
         
         Args:
             client_id: 客户端ID / Client ID
@@ -53,11 +59,30 @@ class MetricsCalculator:
         """
         self.federated_accuracies[client_id] = accuracy
     
+    def record_client_accuracies(self, client_accuracies: Dict[int, float]) -> None:
+        """
+        记录当前轮次所有客户端的准确率 / Record all clients' accuracies for current round
+        
+        Args:
+            client_accuracies: 客户端ID到准确率的映射 / Mapping from client ID to accuracy
+        """
+        if client_accuracies:
+            accuracies = list(client_accuracies.values())
+            self.client_accuracies_per_round.append(client_accuracies.copy())
+            self.avg_client_accuracies.append(np.mean(accuracies))
+            self.max_client_accuracies.append(np.max(accuracies))
+            self.min_client_accuracies.append(np.min(accuracies))
+        else:
+            self.client_accuracies_per_round.append({})
+            self.avg_client_accuracies.append(0.0)
+            self.max_client_accuracies.append(0.0)
+            self.min_client_accuracies.append(0.0)
+    
     def calculate_pcc(self) -> Tuple[float, Dict]:
         """
         计算皮尔逊相关系数 / Calculate Pearson Correlation Coefficient
-        评估独立准确率与最终模型准确率之间的相关性
-        Evaluate correlation between standalone accuracy and final model accuracy
+        评估独立准确率与联邦学习准确率之间的相关性（均在本地测试集上）
+        Evaluate correlation between standalone and federated accuracies (both on local test sets)
         
         Returns:
             (PCC值, 详细信息) / (PCC value, detailed information)
@@ -93,6 +118,7 @@ class MetricsCalculator:
             'federated_mean': np.mean(federated_vector),
             'federated_std': np.std(federated_vector),
             'improvement_mean': np.mean([f - s for s, f in zip(standalone_vector, federated_vector)]),
+            'improvement_std': np.std([f - s for s, f in zip(standalone_vector, federated_vector)]),
             'data_points': list(zip(standalone_vector, federated_vector))
         }
         
@@ -105,19 +131,22 @@ class MetricsCalculator:
         Args:
             round_metrics: 包含轮次指标的字典，包括:
                 - round: 轮次编号
-                - test_accuracy: 测试准确率
-                - test_loss: 测试损失
                 - time_consumption: 时间消耗
                 - contributions: 客户端贡献度
+                - client_accuracies: 客户端准确率
                 等其他指标
         """
         # 保存完整的轮次指标
         self.round_metrics.append(round_metrics)
         
         # 提取关键指标到独立列表
-        self.test_accuracies.append(round_metrics.get('test_accuracy', 0))
-        self.test_losses.append(round_metrics.get('test_loss', 0))
         self.time_consumptions.append(round_metrics.get('time_consumption', 0))
+        
+        # 记录客户端准确率
+        if 'client_accuracies' in round_metrics:
+            self.record_client_accuracies(round_metrics['client_accuracies'])
+        else:
+            self.record_client_accuracies({})
     
     def calculate_final_metrics(self) -> Dict:
         """
@@ -129,13 +158,16 @@ class MetricsCalculator:
         # 计算PCC / Calculate PCC
         pcc, pcc_details = self.calculate_pcc()
         
-        # 计算测试准确率统计 / Calculate test accuracy statistics
-        test_acc_stats = {
-            'final': self.test_accuracies[-1] if self.test_accuracies else 0,
-            'mean': np.mean(self.test_accuracies) if self.test_accuracies else 0,
-            'max': np.max(self.test_accuracies) if self.test_accuracies else 0,
-            'min': np.min(self.test_accuracies) if self.test_accuracies else 0,
-            'std': np.std(self.test_accuracies) if self.test_accuracies else 0
+        # 计算客户端准确率统计
+        client_acc_stats = {
+            'avg_final': self.avg_client_accuracies[-1] if self.avg_client_accuracies else 0,
+            'max_final': self.max_client_accuracies[-1] if self.max_client_accuracies else 0,
+            'min_final': self.min_client_accuracies[-1] if self.min_client_accuracies else 0,
+            'avg_mean': np.mean(self.avg_client_accuracies) if self.avg_client_accuracies else 0,
+            'max_mean': np.mean(self.max_client_accuracies) if self.max_client_accuracies else 0,
+            'min_mean': np.mean(self.min_client_accuracies) if self.min_client_accuracies else 0,
+            'avg_improvement': pcc_details.get('improvement_mean', 0) if pcc_details else 0,
+            'std_improvement': pcc_details.get('improvement_std', 0) if pcc_details else 0
         }
         
         # 计算时间消耗统计 / Calculate time consumption statistics
@@ -147,7 +179,7 @@ class MetricsCalculator:
         }
         
         return {
-            'test_accuracy': test_acc_stats,
+            'client_accuracy': client_acc_stats,
             'time_consumption': time_stats,
             'pcc': pcc,
             'pcc_details': pcc_details,
@@ -192,7 +224,10 @@ class MetricsCalculator:
         metrics['raw_data'] = {
             'round_metrics': self.round_metrics,
             'standalone_accuracies': self.standalone_accuracies,
-            'federated_accuracies': self.federated_accuracies
+            'federated_accuracies': self.federated_accuracies,
+            'avg_client_accuracies': self.avg_client_accuracies,
+            'max_client_accuracies': self.max_client_accuracies,
+            'min_client_accuracies': self.min_client_accuracies
         }
         
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -208,20 +243,27 @@ class MetricsCalculator:
         """
         metrics = self.calculate_final_metrics()
         
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("Performance Metrics Summary / 性能指标摘要")
-        print("="*60)
+        print("Note: All accuracies measured on clients' local test sets")
+        print("注意：所有准确率均在客户端本地测试集上测量")
+        print("="*70)
         
-        print("\n1. Test Accuracy / 测试准确率:")
-        print(f"   Final: {metrics['test_accuracy']['final']:.4f}")
-        print(f"   Mean:  {metrics['test_accuracy']['mean']:.4f}")
-        print(f"   Max:   {metrics['test_accuracy']['max']:.4f}")
+        print("\n1. Client Accuracy (on local test sets) / 客户端准确率（本地测试集）:")
+        print(f"   Avg Client Final: {metrics['client_accuracy']['avg_final']:.4f}")
+        print(f"   Max Client Final: {metrics['client_accuracy']['max_final']:.4f}")
+        print(f"   Min Client Final: {metrics['client_accuracy']['min_final']:.4f}")
+        print(f"   Avg Client Mean:  {metrics['client_accuracy']['avg_mean']:.4f}")
         
-        print("\n2. Time Consumption / 时间消耗:")
+        print("\n2. Performance Improvement / 性能提升:")
+        print(f"   Avg Improvement: {metrics['client_accuracy']['avg_improvement']:.4f} ({metrics['client_accuracy']['avg_improvement']*100:.2f}%)")
+        print(f"   Std Improvement: {metrics['client_accuracy']['std_improvement']:.4f}")
+        
+        print("\n3. Time Consumption / 时间消耗:")
         print(f"   Total: {metrics['time_consumption']['total']:.2f} seconds")
         print(f"   Mean:  {metrics['time_consumption']['mean']:.2f} seconds/round")
         
-        print("\n3. Pearson Correlation Coefficient / 皮尔逊相关系数:")
+        print("\n4. Pearson Correlation Coefficient / 皮尔逊相关系数:")
         print(f"   PCC:   {metrics['pcc']:.4f}")
         if 'pcc_details' in metrics and 'p_value' in metrics['pcc_details']:
             print(f"   p-value: {metrics['pcc_details']['p_value']:.4f}")
@@ -237,4 +279,4 @@ class MetricsCalculator:
             else:
                 print("Very weak or no correlation / 极弱相关或无相关")
         
-        print("="*60)
+        print("="*70)

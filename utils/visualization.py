@@ -1,6 +1,6 @@
 """
 utils/visualization.py
-可视化模块（包含PCC）/ Visualization Module (including PCC)
+可视化模块（专注于客户端本地性能）/ Visualization Module (Focus on Client Local Performance)
 """
 from typing import Dict, List, Optional
 import os
@@ -12,7 +12,8 @@ import seaborn as sns
 class Visualizer:
     """
     Visualization Tool
-    Including PCC scatter plot and correlation analysis visualization
+    专注于客户端本地测试集上的性能可视化
+    Focus on visualizing client performance on local test sets
     """
     
     def __init__(self, save_dir: str = "outputs/plots"):
@@ -38,8 +39,8 @@ class Visualizer:
                         experiment_name: str) -> None:
         """
         绘制PCC散点图 / Plot PCC scatter plot
-        显示独立准确率与联邦学习准确率的相关性
-        Show correlation between standalone and federated accuracies
+        显示独立准确率与联邦学习准确率的相关性（均在本地测试集上）
+        Show correlation between standalone and federated accuracies (both on local test sets)
         
         Args:
             standalone_accuracies: 独立训练准确率列表 / Standalone training accuracy list
@@ -66,8 +67,8 @@ class Visualizer:
         ax1.plot([min_val, max_val], [min_val, max_val], 'g--', 
                 alpha=0.5, linewidth=1.5, label='Perfect correlation')
         
-        ax1.set_xlabel('Standalone Accuracy', fontsize=12)
-        ax1.set_ylabel('Federated Accuracy', fontsize=12)
+        ax1.set_xlabel('Standalone Accuracy (Local Test)', fontsize=12)
+        ax1.set_ylabel('Federated Accuracy (Local Test)', fontsize=12)
         ax1.set_title(f'Correlation Analysis\nPCC = {pcc_value:.4f}, p-value = {p_value:.4f}', 
                      fontsize=13)
         ax1.legend(loc='best')
@@ -91,7 +92,8 @@ class Visualizer:
         ax2.legend(loc='best')
         ax2.grid(True, alpha=0.3)
         
-        plt.suptitle(f'PCC Analysis - {experiment_name}', fontsize=14, fontweight='bold')
+        plt.suptitle(f'PCC Analysis - {experiment_name}\n(Measured on clients\' local test sets)', 
+                    fontsize=14, fontweight='bold')
         plt.tight_layout()
         
         save_path = os.path.join(self.save_dir, f'{experiment_name}_pcc_analysis.png')
@@ -104,79 +106,145 @@ class Visualizer:
         绘制训练曲线 / Plot training curves
         
         Args:
-            metrics_history: Metrics history
+            metrics_history: Metrics history containing:
+                - rounds: 轮次列表 / Round list
+                - avg_client_accuracy: 客户端平均准确率 / Average client accuracy
+                - max_client_accuracy: 客户端最高准确率 / Max client accuracy
+                - time_per_round: 每轮时间 / Time per round
+                - contributions: 贡献度 / Contributions
             experiment_name: Experiment name
         """
-        rounds = metrics_history.get('rounds', list(range(len(metrics_history['accuracy']))))
+        rounds = metrics_history.get('rounds', list(range(1, len(metrics_history.get('avg_client_accuracy', [])) + 1)))
         
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         
-        # 准确率曲线 / Accuracy curve
-        axes[0, 0].plot(rounds, metrics_history['accuracy'], 'b-', linewidth=2)
-        axes[0, 0].set_xlabel('Round')
-        axes[0, 0].set_ylabel('Accuracy')
-        axes[0, 0].set_title('Test Accuracy over Training')
+        # ========== 准确率曲线（双线：平均和最高）/ Accuracy curve (two lines: avg and max) ==========
+        if 'avg_client_accuracy' in metrics_history and metrics_history['avg_client_accuracy']:
+            axes[0, 0].plot(rounds, metrics_history['avg_client_accuracy'], 
+                          'b-', linewidth=2.5, label='Avg Client', marker='o', markersize=5)
+        
+        if 'max_client_accuracy' in metrics_history and metrics_history['max_client_accuracy']:
+            axes[0, 0].plot(rounds, metrics_history['max_client_accuracy'], 
+                          'r-', linewidth=2.5, label='Max Client', marker='^', markersize=5)
+        
+        axes[0, 0].set_xlabel('Round', fontsize=12)
+        axes[0, 0].set_ylabel('Accuracy (on local test sets)', fontsize=12)
+        axes[0, 0].set_title('Client Accuracy over Training\n(Measured on local test sets)', 
+                            fontsize=13, fontweight='bold')
+        axes[0, 0].legend(loc='best', fontsize=11)
         axes[0, 0].grid(True, alpha=0.3)
         
-        # 损失曲线 / Loss curve
-        axes[0, 1].plot(rounds, metrics_history['loss'], 'r-', linewidth=2)
-        axes[0, 1].set_xlabel('Round')
-        axes[0, 1].set_ylabel('Loss')
-        axes[0, 1].set_title('Training Loss')
-        axes[0, 1].grid(True, alpha=0.3)
+        # 添加y轴范围提示
+        if metrics_history.get('avg_client_accuracy'):
+            y_min = min(metrics_history['avg_client_accuracy'])
+            y_max = max(metrics_history.get('max_client_accuracy', metrics_history['avg_client_accuracy']))
+            axes[0, 0].set_ylim([max(0, y_min - 0.05), min(1.0, y_max + 0.05)])
         
-        # 贡献度分布 / Contribution distribution
+        # ========== 准确率差异（最高-平均）/ Accuracy gap (max - avg) ==========
+        if 'avg_client_accuracy' in metrics_history and 'max_client_accuracy' in metrics_history:
+            if metrics_history['avg_client_accuracy'] and metrics_history['max_client_accuracy']:
+                accuracy_gap = [max_acc - avg_acc for max_acc, avg_acc in 
+                              zip(metrics_history['max_client_accuracy'], 
+                                  metrics_history['avg_client_accuracy'])]
+                
+                axes[0, 1].plot(rounds, accuracy_gap, 'purple', linewidth=2, marker='s', markersize=4)
+                axes[0, 1].set_xlabel('Round', fontsize=12)
+                axes[0, 1].set_ylabel('Accuracy Gap', fontsize=12)
+                axes[0, 1].set_title('Client Performance Gap\n(Max - Avg)', fontsize=13, fontweight='bold')
+                axes[0, 1].grid(True, alpha=0.3)
+                
+                # 添加趋势线
+                if len(accuracy_gap) > 1:
+                    z = np.polyfit(rounds, accuracy_gap, 1)
+                    p = np.poly1d(z)
+                    axes[0, 1].plot(rounds, p(rounds), "r--", alpha=0.5, linewidth=1.5, 
+                                  label=f'Trend: {"↓" if z[0] < 0 else "↑"}')
+                    axes[0, 1].legend(loc='best')
+        
+        # ========== 贡献度分布 / Contribution distribution ==========
         if 'contributions' in metrics_history and metrics_history['contributions']:
             contributions = metrics_history['contributions']
-            # 将contributions转换为正确的格式 / Convert contributions to correct format
-            # 每个元素应该是一个包含该轮次所有客户端贡献度的列表
+            
+            # 准备箱线图数据 / Prepare box plot data
             contribution_data = []
             valid_rounds = []
             
             for i, round_contributions in enumerate(contributions):
                 values = []
-                if isinstance(round_contributions, dict):
-                    values = list(round_contributions.values())
-                elif isinstance(round_contributions, (list, np.ndarray)):
-                    values = list(round_contributions)
-                else:
-                    continue
                 
-                if values:
+                # 处理不同格式的贡献度数据 / Handle different formats of contribution data
+                if isinstance(round_contributions, dict):
+                    values = [v for v in round_contributions.values() if v is not None and v > 0]
+                elif isinstance(round_contributions, (list, np.ndarray)):
+                    values = [v for v in round_contributions if v is not None and v > 0]
+                
+                if values:  # 只添加非空数据 / Only add non-empty data
                     contribution_data.append(values)
-                    valid_rounds.append(rounds[i])
+                    valid_rounds.append(rounds[i] if i < len(rounds) else i + 1)
             
-            if contribution_data:
-                axes[1, 0].boxplot(contribution_data, positions=valid_rounds)
-                axes[1, 0].set_xlabel('Round')
-                axes[1, 0].set_ylabel('AMAC Contribution')
-                axes[1, 0].set_title('Client Contribution Distribution')
-                axes[1, 0].grid(True, alpha=0.3)
+            if contribution_data and len(contribution_data) > 0:
+                # 绘制箱线图 / Draw box plot
+                bp = axes[1, 0].boxplot(contribution_data, positions=valid_rounds,
+                                       widths=0.6, patch_artist=True,
+                                       showfliers=False)  # 不显示异常值
+                
+                # 美化箱线图 / Beautify box plot
+                for patch in bp['boxes']:
+                    patch.set_facecolor('lightblue')
+                    patch.set_alpha(0.7)
+                
+                for median in bp['medians']:
+                    median.set_color('red')
+                    median.set_linewidth(2)
+                
+                # 添加平均值线 / Add mean line
+                means = [np.mean(data) for data in contribution_data]
+                axes[1, 0].plot(valid_rounds, means, 'g--', linewidth=2, 
+                              marker='D', markersize=5, label='Mean')
+                
+                axes[1, 0].set_xlabel('Round', fontsize=12)
+                axes[1, 0].set_ylabel('AMAC Contribution', fontsize=12)
+                axes[1, 0].set_title('Client Contribution Distribution', fontsize=13, fontweight='bold')
+                axes[1, 0].legend(loc='best', fontsize=10)
+                axes[1, 0].grid(True, alpha=0.3, axis='y')
+                
+                # 设置x轴范围 / Set x-axis range
+                if valid_rounds:
+                    axes[1, 0].set_xlim([min(valid_rounds) - 0.5, max(valid_rounds) + 0.5])
             else:
-                axes[1, 0].text(0.5, 0.5, 'No valid contribution data', 
-                               ha='center', va='center', fontsize=12, color='gray')
-                axes[1, 0].set_xlabel('Round')
-                axes[1, 0].set_ylabel('AMAC Contribution')
-                axes[1, 0].set_title('Client Contribution Distribution')
-                axes[1, 0].grid(True, alpha=0.3)
+                # 如果没有有效数据 / If no valid data
+                axes[1, 0].text(0.5, 0.5, 'No valid contribution data\n(contributions may all be 0 or None)', 
+                              ha='center', va='center', fontsize=12, color='gray',
+                              transform=axes[1, 0].transAxes)
+                axes[1, 0].set_xlabel('Round', fontsize=12)
+                axes[1, 0].set_ylabel('AMAC Contribution', fontsize=12)
+                axes[1, 0].set_title('Client Contribution Distribution', fontsize=13, fontweight='bold')
         else:
-            # 如果没有贡献度数据,显示提示信息
+            # 如果完全没有贡献度数据 / If no contribution data at all
             axes[1, 0].text(0.5, 0.5, 'No contribution data available', 
-                           ha='center', va='center', fontsize=12, color='gray')
-            axes[1, 0].set_xlabel('Round')
-            axes[1, 0].set_ylabel('AMAC Contribution')
-            axes[1, 0].set_title('Client Contribution Distribution')
-            axes[1, 0].grid(True, alpha=0.3)
+                          ha='center', va='center', fontsize=12, color='gray',
+                          transform=axes[1, 0].transAxes)
+            axes[1, 0].set_xlabel('Round', fontsize=12)
+            axes[1, 0].set_ylabel('AMAC Contribution', fontsize=12)
+            axes[1, 0].set_title('Client Contribution Distribution', fontsize=13, fontweight='bold')
         
-        # 时间消耗 / Time consumption
-        if 'time_per_round' in metrics_history:
-            axes[1, 1].plot(rounds, metrics_history['time_per_round'], 'g-', linewidth=2)
-            axes[1, 1].set_xlabel('Round')
-            axes[1, 1].set_ylabel('Time (seconds)')
-            axes[1, 1].set_title('Time Consumption per Round')
+        # ========== 时间消耗 / Time consumption ==========
+        if 'time_per_round' in metrics_history and metrics_history['time_per_round']:
+            axes[1, 1].plot(rounds, metrics_history['time_per_round'], 
+                          'g-', linewidth=2, marker='o', markersize=4)
+            axes[1, 1].set_xlabel('Round', fontsize=12)
+            axes[1, 1].set_ylabel('Time (seconds)', fontsize=12)
+            axes[1, 1].set_title('Time Consumption per Round', fontsize=13, fontweight='bold')
             axes[1, 1].grid(True, alpha=0.3)
+            
+            # 添加平均时间线 / Add average time line
+            avg_time = np.mean(metrics_history['time_per_round'])
+            axes[1, 1].axhline(y=avg_time, color='r', linestyle='--', 
+                             linewidth=1.5, label=f'Avg: {avg_time:.2f}s')
+            axes[1, 1].legend(loc='best', fontsize=10)
         
-        plt.suptitle(f'Training Progress - {experiment_name}', fontsize=14, fontweight='bold')
+        plt.suptitle(f'Training Progress - {experiment_name}\n(Clients evaluated on their own local test sets)', 
+                    fontsize=14, fontweight='bold')
         plt.tight_layout()
         
         save_path = os.path.join(self.save_dir, f'{experiment_name}_training_curves.png')
@@ -249,7 +317,7 @@ class Visualizer:
         ax1.set_xticks(range(len(client_ids)))
         ax1.set_xticklabels(client_ids, rotation=45)
         ax1.set_xlabel('Client ID')
-        ax1.set_ylabel('Model Quality (Accuracy)')
+        ax1.set_ylabel('Model Quality (Accuracy on Local Test)')
         ax1.set_title('Final Model Quality by Client')
         ax1.grid(True, alpha=0.3)
         
@@ -269,7 +337,7 @@ class Visualizer:
                 ax2.plot(rounds, client_qualities[cid], label=f'Client {cid}', linewidth=2)
         
         ax2.set_xlabel('Round')
-        ax2.set_ylabel('Model Quality')
+        ax2.set_ylabel('Model Quality (Local Test)')
         ax2.set_title('Model Quality Evolution')
         ax2.legend(loc='best')
         ax2.grid(True, alpha=0.3)

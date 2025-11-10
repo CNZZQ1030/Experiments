@@ -1,6 +1,6 @@
 """
 federated/client.py
-联邦学习客户端（支持独立训练基准）/ Federated Learning Client (with Standalone Training Baseline)
+联邦学习客户端（使用本地测试集）/ Federated Learning Client (with Local Test Set)
 """
 
 import torch
@@ -15,8 +15,8 @@ from typing import Dict, Optional, Tuple
 class FederatedClient:
     """
     联邦学习客户端 / Federated Learning Client
-    支持独立训练基准计算以用于PCC评估
-    Supports standalone training baseline calculation for PCC evaluation
+    使用本地测试集进行评估，支持独立训练基准计算
+    Uses local test set for evaluation, supports standalone training baseline
     """
     
     def __init__(self, client_id: int, model: nn.Module, 
@@ -28,14 +28,14 @@ class FederatedClient:
         Args:
             client_id: 客户端ID / Client ID
             model: 模型 / Model
-            train_dataloader: 训练数据加载器 / Training data loader
-            test_dataloader: 测试数据加载器 / Test data loader
+            train_dataloader: 训练数据加载器（客户端本地训练集）/ Training data loader (client's local train set)
+            test_dataloader: 测试数据加载器（客户端本地测试集）/ Test data loader (client's local test set)
             device: 计算设备 / Computing device
         """
         self.client_id = client_id
         self.model = copy.deepcopy(model).to(device)
         self.train_dataloader = train_dataloader
-        self.test_dataloader = test_dataloader
+        self.test_dataloader = test_dataloader  # 客户端自己的测试集 / Client's own test set
         self.device = device
         
         # 独立训练基准 / Standalone training baseline
@@ -49,19 +49,22 @@ class FederatedClient:
         
         # 训练统计 / Training statistics
         self.training_time = 0
-        self.num_samples = len(train_dataloader.dataset) if hasattr(train_dataloader, 'dataset') else 0
+        self.num_train_samples = len(train_dataloader.dataset) if hasattr(train_dataloader, 'dataset') else 0
+        self.num_test_samples = len(test_dataloader.dataset) if hasattr(test_dataloader, 'dataset') else 0
         
         # 会员等级 / Membership level
         self.membership_level = "bronze"
         
         # 贡献度历史 / Contribution history
         self.contribution_history = []
+        
+        print(f"Client {client_id} initialized: Train samples={self.num_train_samples}, Test samples={self.num_test_samples}")
     
     def train_standalone(self, epochs: int = 10, lr: float = 0.01) -> Tuple[float, float]:
         """
         独立训练（不参与联邦学习）/ Standalone training (without federated learning)
-        计算客户端仅使用本地数据的基准性能
-        Calculate baseline performance using only local data
+        在客户端自己的本地测试集上评估
+        Evaluated on client's own local test set
         
         Args:
             epochs: 训练轮次 / Training epochs
@@ -88,12 +91,12 @@ class FederatedClient:
                 loss.backward()
                 optimizer.step()
         
-        # 评估独立模型 / Evaluate standalone model
+        # 在本地测试集上评估独立模型 / Evaluate standalone model on local test set
         self.standalone_accuracy, self.standalone_loss = self._evaluate_model(
             self.standalone_model, self.test_dataloader
         )
         
-        print(f"Client {self.client_id} - Standalone Accuracy: {self.standalone_accuracy:.4f}")
+        print(f"Client {self.client_id} - Standalone Accuracy (on local test set): {self.standalone_accuracy:.4f}")
         
         return self.standalone_accuracy, self.standalone_loss
     
@@ -101,6 +104,8 @@ class FederatedClient:
                        epochs: int = 5, lr: float = 0.01) -> Tuple[Dict, Dict]:
         """
         联邦学习训练 / Federated learning training
+        在客户端自己的本地测试集上评估
+        Evaluated on client's own local test set
         
         Args:
             global_weights: 全局模型权重（可能是个性化的）/ Global model weights (possibly personalized)
@@ -140,7 +145,7 @@ class FederatedClient:
         # 计算训练时间 / Calculate training time
         self.training_time = time.time() - start_time
         
-        # 评估联邦学习模型 / Evaluate federated learning model
+        # 在本地测试集上评估联邦学习模型 / Evaluate federated model on local test set
         self.federated_accuracy, self.federated_loss = self._evaluate_model(
             self.model, self.test_dataloader
         )
@@ -149,24 +154,24 @@ class FederatedClient:
         avg_loss = total_loss / batch_count if batch_count > 0 else 0
         train_info = {
             'client_id': self.client_id,
-            'num_samples': self.num_samples,
+            'num_samples': self.num_train_samples,
             'training_time': self.training_time,
             'avg_loss': avg_loss,
             'federated_accuracy': self.federated_accuracy,
             'federated_loss': self.federated_loss,
             'membership_level': self.membership_level,
-            'model_quality': 1.0 / (1.0 + avg_loss),  # 简单的质量评估
+            'model_quality': 1.0 / (1.0 + avg_loss),
         }
         
         return self.model.state_dict(), train_info
     
     def _evaluate_model(self, model: nn.Module, dataloader: DataLoader) -> Tuple[float, float]:
         """
-        评估模型 / Evaluate model
+        评估模型（在指定的数据加载器上）/ Evaluate model (on specified data loader)
         
         Args:
             model: 要评估的模型 / Model to evaluate
-            dataloader: 数据加载器 / Data loader
+            dataloader: 数据加载器（本地测试集）/ Data loader (local test set)
             
         Returns:
             (准确率, 损失) / (accuracy, loss)
@@ -204,8 +209,8 @@ class FederatedClient:
     def get_performance_improvement(self) -> float:
         """
         获取性能改进 / Get performance improvement
-        计算联邦学习相对于独立训练的改进
-        Calculate improvement of federated learning over standalone training
+        计算联邦学习相对于独立训练的改进（在本地测试集上）
+        Calculate improvement of federated learning over standalone training (on local test set)
         
         Returns:
             性能改进百分比 / Performance improvement percentage
@@ -233,6 +238,7 @@ class FederatedClient:
             'federated_accuracy': self.federated_accuracy,
             'performance_improvement': self.get_performance_improvement(),
             'membership_level': self.membership_level,
-            'num_samples': self.num_samples,
+            'num_train_samples': self.num_train_samples,
+            'num_test_samples': self.num_test_samples,
             'training_time': self.training_time
         }
