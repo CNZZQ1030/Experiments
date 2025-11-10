@@ -42,7 +42,7 @@ class AMACContributionCalculator:
         # EMA平滑后的贡献度 / EMA-smoothed contributions
         self.client_ema_contributions = {}  # {client_id: ema_value}
         
-        print(f"🧮 AMACContributionCalculator initialized")
+        print(f"AMACContributionCalculator initialized")
         print(f"   T={T}, gamma={gamma}, EMA_smoothing={use_ema_smoothing}")
         if use_ema_smoothing:
             print(f"   EMA α={ema_alpha}")

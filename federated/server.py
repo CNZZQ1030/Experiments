@@ -121,32 +121,32 @@ class FederatedServer:
         
         # 初始化聚合梯度 / Initialize aggregated gradient
         for key in next(iter(self.client_gradients.values())).keys():
-            aggregated[key] = torch.zeros_like(
-                next(iter(self.client_gradients.values()))[key]
-            )
+            sample_tensor = next(iter(self.client_gradients.values()))[key]
+            # 使用与原始张量相同的数据类型初始化
+            aggregated[key] = torch.zeros_like(sample_tensor, dtype=sample_tensor.dtype)
         
         # 简单平均所有梯度 / Simple average of all gradients
         for gradient in self.client_gradients.values():
             for key in gradient.keys():
-                aggregated[key] += gradient[key] / num_clients
+                # 如果是整数类型，先转换为浮点类型
+                if gradient[key].dtype in [torch.int32, torch.int64, torch.long]:
+                    aggregated[key] = aggregated[key].float()
+                    aggregated[key] += gradient[key].float() / num_clients
+                else:
+                    aggregated[key] += gradient[key] / num_clients
         
         return aggregated
     
     def distribute_personalized_models(self, round_num: int) -> Dict[int, Dict[str, torch.Tensor]]:
         """
         分发个性化模型 / Distribute personalized models
-        基于贡献度为每个客户端创建差异化模型
-        Create differentiated models for each client based on contribution
-        
-        Args:
-            round_num: 当前轮次 / Current round
-            
-        Returns:
-            个性化模型字典 / Personalized models dictionary
         """
         # 计算所有客户端贡献度 / Calculate all client contributions
         contributions = self.calculate_all_contributions(round_num)
         
+        # 确保贡献度被保存
+        self.client_contributions = contributions
+    
         # 准备所有更新列表 / Prepare all updates list
         all_updates = []
         for client_id, contribution in contributions.items():
@@ -197,8 +197,24 @@ class FederatedServer:
             
             for key in client_weights.keys():
                 if key not in aggregated_weights:
+                    # 保持原始数据类型初始化
                     aggregated_weights[key] = torch.zeros_like(client_weights[key])
-                aggregated_weights[key] += client_weights[key] * weight_factor
+                
+                # 处理不同数据类型
+                if client_weights[key].dtype in [torch.int32, torch.int64, torch.long]:
+                    # 整数类型：转换为float进行计算，最后再转回原类型
+                    if aggregated_weights[key].dtype in [torch.int32, torch.int64, torch.long]:
+                        aggregated_weights[key] = aggregated_weights[key].float()
+                    aggregated_weights[key] += client_weights[key].float() * weight_factor
+                else:
+                    # 浮点类型：直接计算
+                    aggregated_weights[key] += client_weights[key] * weight_factor
+        
+        # 将整数类型的权重转回原类型
+        for key in aggregated_weights.keys():
+            sample_weight = next(iter(self.client_updates.values()))[key]
+            if sample_weight.dtype in [torch.int32, torch.int64, torch.long]:
+                aggregated_weights[key] = aggregated_weights[key].round().to(sample_weight.dtype)
         
         # 更新全局模型 / Update global model
         self.global_model.load_state_dict(aggregated_weights)

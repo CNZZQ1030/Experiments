@@ -21,15 +21,14 @@ class MetricsCalculator:
     def __init__(self):
         """初始化指标计算器 / Initialize metrics calculator"""
         # 性能指标 / Performance metrics
-        self.test_accuracies = []
-        self.time_consumptions = []
+        self.round_metrics = []  # 存储每轮指标
+        self.test_accuracies = []  # 测试准确率历史
+        self.test_losses = []  # 测试损失历史
+        self.time_consumptions = []  # 时间消耗历史
         
         # PCC相关数据 / PCC related data
         self.standalone_accuracies = {}  # 客户端独立训练准确率
         self.federated_accuracies = {}   # 客户端联邦学习准确率
-        
-        # 轮次数据 / Round data
-        self.round_metrics = []
         
         # 贡献度数据 / Contribution data
         self.contribution_history = []
@@ -99,28 +98,26 @@ class MetricsCalculator:
         
         return pcc, details
     
-    def record_round_metrics(self, round_num: int, metrics: Dict) -> None:
+    def record_round(self, round_metrics: Dict):
         """
-        记录轮次指标 / Record round metrics
+        记录单轮训练指标 / Record single round metrics
         
         Args:
-            round_num: 轮次号 / Round number
-            metrics: 指标字典 / Metrics dictionary
+            round_metrics: 包含轮次指标的字典，包括:
+                - round: 轮次编号
+                - test_accuracy: 测试准确率
+                - test_loss: 测试损失
+                - time_consumption: 时间消耗
+                - contributions: 客户端贡献度
+                等其他指标
         """
-        round_data = {
-            'round': round_num,
-            'timestamp': datetime.now().isoformat(),
-            **metrics
-        }
-        self.round_metrics.append(round_data)
+        # 保存完整的轮次指标
+        self.round_metrics.append(round_metrics)
         
-        # 记录测试准确率 / Record test accuracy
-        if 'test_accuracy' in metrics:
-            self.test_accuracies.append(metrics['test_accuracy'])
-        
-        # 记录时间消耗 / Record time consumption
-        if 'time_consumption' in metrics:
-            self.time_consumptions.append(metrics['time_consumption'])
+        # 提取关键指标到独立列表
+        self.test_accuracies.append(round_metrics.get('test_accuracy', 0))
+        self.test_losses.append(round_metrics.get('test_loss', 0))
+        self.time_consumptions.append(round_metrics.get('time_consumption', 0))
     
     def calculate_final_metrics(self) -> Dict:
         """

@@ -79,14 +79,14 @@ class TimeSliceManager:
         # === 统计信息 ===
         self.contribution_history = []  # 用于分析
         
-        print(f"🔧 TimeSliceManager initialized with method: {smoothing_method}")
+        print(f"TimeSliceManager initialized with method: {smoothing_method}")
         if smoothing_method == "ema":
             equiv_window = 2 / ema_alpha - 1
-            print(f"   EMA α={ema_alpha}, equivalent window≈{equiv_window:.1f} rounds")
+            print(f"EMA α={ema_alpha}, equivalent window≈{equiv_window:.1f} rounds")
         elif smoothing_method == "sliding_window":
-            print(f"   Sliding Window: validity={validity_slices} slices")
+            print(f"Sliding Window: validity={validity_slices} slices")
         else:
-            print(f"   Hybrid: EMA_weight={hybrid_ema_weight}, window_size={hybrid_window_size}")
+            print(f"Hybrid: EMA_weight={hybrid_ema_weight}, window_size={hybrid_window_size}")
     
     # =========================================================================
     # EMA模式方法 / EMA Mode Methods

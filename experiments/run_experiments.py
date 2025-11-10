@@ -172,42 +172,17 @@ class ExperimentRunner:
     def select_clients(self, round_num: int) -> List[int]:
         """
         选择参与训练的客户端 / Select clients for training
-        基于会员等级和贡献度的优先级选择
-        Priority selection based on membership level and contribution
+        现在所有客户端都参与训练，只是根据贡献度获得差异化模型
+        All clients participate in training, but receive differentiated models based on contribution
         
         Args:
             round_num: 当前轮次 / Current round
             
         Returns:
-            选中的客户端ID列表 / Selected client ID list
+            所有客户端ID列表 / All client ID list
         """
-        # 计算客户端优先级 / Calculate client priority
-        client_priorities = {}
-        
-        for client_id in range(self.num_clients):
-            # 获取会员信息 / Get membership info
-            membership_info = self.membership_system.get_client_membership_info(client_id)
-            level = membership_info['level']
-            points = membership_info.get('total_points', 0)
-            
-            # 计算优先级分数 / Calculate priority score
-            level_scores = {'diamond': 4, 'gold': 3, 'silver': 2, 'bronze': 1}
-            priority = level_scores[level] * 1000 + points
-            client_priorities[client_id] = priority
-        
-        # 按优先级排序 / Sort by priority
-        sorted_clients = sorted(client_priorities.items(), 
-                              key=lambda x: x[1], reverse=True)
-        
-        # 选择客户端 / Select clients
-        num_to_select = min(FederatedConfig.CLIENTS_PER_ROUND, self.num_clients)
-        
-        # 高优先级客户端优先 / High priority clients first
-        selected = []
-        for client_id, _ in sorted_clients[:num_to_select]:
-            selected.append(client_id)
-        
-        return selected
+        # 返回所有客户端 / Return all clients
+        return list(range(self.num_clients))
     
     def run_single_round(self, round_num: int) -> Dict:
         """
@@ -221,19 +196,19 @@ class ExperimentRunner:
         """
         round_start_time = time.time()
         
-        # 选择客户端 / Select clients
-        selected_clients = self.select_clients(round_num)
+        # 所有客户端都参与训练 / All clients participate
+        selected_clients = list(range(self.num_clients))
         
         # 重置服务器轮次数据 / Reset server round data
         self.server.reset_round()
         
         # 客户端训练 / Client training
-        print(f"\nRound {round_num}: Training {len(selected_clients)} clients...")
+        print(f"\nRound {round_num}: Training all {len(selected_clients)} clients...")
         
         for client_id in tqdm(selected_clients, desc=f"Round {round_num}"):
             client = self.clients[client_id]
             
-            # 获取模型（可能是个性化的）/ Get model (possibly personalized)
+            # 获取个性化模型（基于历史贡献度）/ Get personalized model (based on historical contribution)
             if round_num == 1:
                 # 第一轮使用全局模型 / First round uses global model
                 model_weights = self.server.get_global_model_weights()
@@ -297,10 +272,10 @@ class ExperimentRunner:
             'test_loss': global_loss,
             'time_consumption': round_time,
             'num_selected_clients': len(selected_clients),
-            'contribution_stats': self.server.get_contribution_statistics()
+            'contributions': self.server.client_contributions.copy()
         }
         
-        self.metrics_calculator.record_round_metrics(round_num, round_metrics)
+        self.metrics_calculator.record_round(round_metrics)
         
         return round_metrics
     

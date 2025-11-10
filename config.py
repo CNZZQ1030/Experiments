@@ -30,24 +30,28 @@ PLOTS_DIR = os.path.join(OUTPUT_DIR, "plots")
 # =====================================
 
 class FederatedConfig:
-    """联邦学习参数配置 / Federated Learning Parameters"""
+    """联邦学习配置 / Federated Learning Configuration"""
     
-    # 客户端配置 / Client configuration
+    # 基本参数 / Basic parameters
     NUM_CLIENTS = 100  # 客户端总数 / Total number of clients
-    CLIENTS_PER_ROUND = 30  # 每轮选择的客户端数 / Number of clients selected per round
+    NUM_ROUNDS = 100  # 训练轮次 / Training rounds
     
-    # 训练配置 / Training configuration
-    NUM_ROUNDS = 100  # 训练轮次 / Number of training rounds
+    # 本地训练参数 / Local training parameters
     LOCAL_EPOCHS = 5  # 本地训练轮次 / Local training epochs
     LOCAL_BATCH_SIZE = 32  # 本地批次大小 / Local batch size
     LEARNING_RATE = 0.01  # 学习率 / Learning rate
     
-    # 数据分布 / Data distribution
-    DATA_DISTRIBUTION = "iid"  # "iid" or "non-iid"
-    NON_IID_ALPHA = 0.5  # Dirichlet分布参数 / Dirichlet distribution parameter
+    # 数据分布参数 / Data distribution parameters
+    DISTRIBUTION_TYPE = "iid"  # 数据分布类型 / Data distribution type: "iid" or "non-iid"
+    NON_IID_ALPHA = 0.5  # Non-IID分布的Dirichlet参数 / Dirichlet parameter for Non-IID
     
-    # 客户端选择策略 / Client selection strategy
-    USE_DYNAMIC_SELECTION = True  # 是否使用动态选择（基于等级和积分）/ Whether to use dynamic selection based on level and points
+    # 优化器参数 / Optimizer parameters
+    MOMENTUM = 0.9  # SGD动量 / SGD momentum
+    WEIGHT_DECAY = 1e-4  # 权重衰减 / Weight decay
+    
+    # 注意：在差异化模型分发机制下，所有客户端都参与训练
+    # Note: Under differentiated model distribution, all clients participate
+    # 不需要 CLIENTS_PER_ROUND 参数 / No need for CLIENTS_PER_ROUND parameter
 
 # =====================================
 # 激励机制配置 / Incentive Mechanism Configuration
@@ -56,10 +60,9 @@ class FederatedConfig:
 class IncentiveConfig:
     """激励机制参数配置 / Incentive Mechanism Parameters"""
     
-    # 积分计算权重 / Points calculation weights
-    ALPHA = 0.3  # 数据量权重 / Data size weight
-    BETA = 0.3   # 计算时间权重 / Computation time weight
-    GAMMA = 0.4  # 模型质量权重 / Model quality weight
+    # AMAC 相关配置 / AMAC Related Configuration
+    AMAC_LAMBDA = 0.5  # AMAC平滑参数 / AMAC smoothing parameter
+    AMAC_WINDOW_SIZE = 10  # AMAC滑动窗口大小 / AMAC sliding window size
     
     # 会员等级阈值 / Membership level thresholds
     LEVEL_THRESHOLDS = {
@@ -94,62 +97,23 @@ class IncentiveConfig:
     # 启用差异化模型奖励 / Enable differentiated model rewards
     ENABLE_TIERED_REWARDS = True
     
-    # ===== 差异化策略说明 / Differentiation Strategy =====
-    # 
-    # 实现方式: 基于访问控制的个性化模型聚合
-    # Implementation: Personalized model aggregation based on access control
-    # 
-    # 核心机制 / Core Mechanism:
-    # 1. 贡献度 = 0: 
-    #    - 只能使用自己的本地模型（最低保障）
-    #    - Only get local model (minimum guarantee)
-    # 
-    # 2. 贡献度 > 0:
-    #    - 可以访问其他客户端的模型更新
-    #    - Can access other clients' model updates
-    #    - 访问数量由贡献度和会员等级共同决定
-    #    - Number of accessible updates determined by contribution and level
-    # 
-    # 3. 聚合方式:
-    #    - 对可访问的更新进行加权聚合（按贡献度加权）
-    #    - Weighted aggregation of accessible updates (weighted by contribution)
-    #    - 贡献度高的更新获得更大权重
-    #    - Updates with higher contribution get larger weights
-    #
-    # 示例 / Example:
-    # - Bronze级，贡献度0.2: 只能访问最好的1-2个更新
-    #   Bronze level, contribution 0.2: Access only 1-2 best updates
-    # - Diamond级，贡献度0.8: 可以访问几乎所有更新
-    #   Diamond level, contribution 0.8: Access almost all updates
-    # 
-    # ===================================================================
-    
-    # 等级访问比例 / Level access ratios
-    # 控制不同等级客户端能访问的更新比例
-    # Control the ratio of updates accessible by different levels
+    # 等级基础访问比例 / Level base access ratios
+    # 与AMAC贡献度结合决定最终访问权限
+    # Combined with AMAC contribution to determine final access
     LEVEL_ACCESS_RATIOS = {
-        'diamond': 1.0,   # 可访问100%的可用更新 / Access 100% of available updates
-        'gold': 0.8,      # 可访问80%的可用更新 / Access 80% of available updates
-        'silver': 0.6,    # 可访问60%的可用更新 / Access 60% of available updates
-        'bronze': 0.4     # 可访问40%的可用更新 / Access 40% of available updates
+        'diamond': 1.0,
+        'gold': 0.8,
+        'silver': 0.6,
+        'bronze': 0.4
     }
     
-    # 有效访问比例计算权重 / Effective access ratio calculation weights
-    # 有效访问比例 = 贡献度 × CONTRIBUTION_WEIGHT + 等级比例 × LEVEL_WEIGHT
-    # Effective access ratio = contribution × CONTRIBUTION_WEIGHT + level_ratio × LEVEL_WEIGHT
-    CONTRIBUTION_WEIGHT = 0.7  # 贡献度权重70% / Contribution weight 70%
-    LEVEL_WEIGHT = 0.3         # 等级权重30% / Level weight 30%
-    
     # 最小保障访问数量 / Minimum guaranteed access
-    # 即使贡献度很低，也至少能访问这么多更新（包括自己的）
-    # Even with low contribution, can access at least this many updates (including own)
     MIN_ACCESSIBLE_UPDATES = 1
     
     # 贡献-回报相关性计算参数
-    # Contribution-Reward Correlation parameters
-    CRC_WINDOW_SIZE = 10  # 计算相关性的窗口大小（轮次数）
-    CRC_MIN_SAMPLES = 3   # 计算相关性所需的最小样本数
-    CRC_START_ROUND = 1   # 从第1轮开始尝试计算CRC
+    CRC_WINDOW_SIZE = 10
+    CRC_MIN_SAMPLES = 3
+    CRC_START_ROUND = 1
 
 # =====================================
 # 数据集配置 / Dataset Configuration

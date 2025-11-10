@@ -16,7 +16,7 @@ from datetime import datetime
 # 添加路径 / Add path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from experiments.experiment_runner import ExperimentRunner, compare_experiments
+from experiments.run_experiments import ExperimentRunner, compare_experiments
 from config import SEED, DEVICE
 
 
