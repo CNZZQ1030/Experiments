@@ -1,169 +1,325 @@
-# 基于CGSV的联邦学习激励机制
-# CGSV-based Federated Learning Incentive Mechanism
+# 联邦学习激励机制 - AMAC贡献度与差异化模型分发
+# Federated Learning Incentive Mechanism - AMAC Contribution and Differentiated Model Distribution
 
-## 🚀 核心改进 / Core Improvements
+## 📋 目录 / Table of Contents
+1. [系统概述](#系统概述)
+2. [工作流程](#工作流程)
+3. [核心创新](#核心创新)
+4. [运行指南](#运行指南)
+5. [实验配置](#实验配置)
+6. [评价指标](#评价指标)
 
-### 1. **CGSV贡献度评估机制**
-本项目实现了基于**余弦梯度Shapley值（CGSV）**的客户端贡献度评估机制，相比原始版本有以下重大改进：
+---
 
-- **精确的贡献度计算**：使用梯度余弦相似度衡量每个客户端的模型更新与全局更新的一致性
-- **差异化模型分发**：贡献度为0的客户端只能获得本地模型，贡献度越高获得越多其他客户端的更新
-- **精细化奖励机制**：即使会员等级相同，不同贡献度的客户端获得的模型质量也不同
+## 系统概述 / System Overview
 
-### 2. **新增评价指标**
+本系统实现了基于AMAC（Adaptive Magnitude-Aware Contribution）贡献度计算的联邦学习激励机制，通过差异化模型分发策略激励客户端参与。
 
-#### 📊 贡献-回报相关性 (Contribution-Reward Correlation)
-- **定义**：衡量客户端贡献度与其获得的模型性能之间的皮尔逊相关系数
-- **意义**：反映激励机制是否实现了"按劳分配"的目标
-- **理想值**：接近+1表示强正相关，激励机制非常有效
+### 主要特点 / Key Features
 
-#### ⚖️ 公平性指数 (Fairness Index)
-- **定义**：使用Jain's Fairness Index评估奖励分配的公平性
-- **计算**：J = (Σx_i)² / (n × Σx_i²)
-- **理想值**：接近1表示完全公平的分配
+1. **AMAC贡献度计算** / **AMAC Contribution Calculation**
+   - 解决传统CGSV的"贡献递减"问题
+   - 自适应平衡梯度方向和收敛性
+   - 训练初期关注方向，后期关注收敛
 
-#### 📈 激励有效性 (Incentive Effectiveness)
-- **定义**：综合评估激励机制对系统整体性能的提升效果
-- **考虑因素**：参与率趋势、系统活跃度趋势、模型性能改进趋势
-- **理想值**：> 0.5表示正向效果
+2. **差异化模型分发** / **Differentiated Model Distribution**
+   - 贡献度为0：仅获得本地模型
+   - 贡献度越高：获得更多其他客户端的更新
+   - 同等级客户端根据贡献度获得不同质量模型
 
-## 🏗️ 项目结构
+3. **时间片管理** / **Time Slice Management**
+   - 支持5种时间片划分方式
+   - 贡献度与时间片协同管理
+   - 积分有效期机制
+
+---
+
+## 工作流程 / Workflow
+
+### 完整流程图 / Complete Workflow
 
 ```
-federated_learning/
-├── config/                 # 配置文件
-├── datasets/              # 数据集处理
-├── experiments/           # 实验运行器
-├── federated/            # 联邦学习核心
-│   ├── client.py         # 客户端实现
-│   └── server.py         # 服务器实现（支持差异化模型分发）
-├── incentive/            # 激励机制
-│   ├── points_calculator.py  # CGSV积分计算器
-│   ├── membership.py         # 会员系统
-│   └── time_slice.py        # 时间片管理
-├── models/               # 模型定义
-├── utils/               # 工具类
-│   ├── metrics.py       # 评估指标（包含新指标）
-│   └── visualization.py # 可视化（支持新指标可视化）
-└── outputs/             # 输出结果
+┌─────────────────────────────────────────────────────────┐
+│                    初始化阶段                              │
+├─────────────────────────────────────────────────────────┤
+│ 1. 数据加载与分割（IID/Non-IID）                          │
+│ 2. 模型初始化                                           │
+│ 3. 客户端创建                                           │
+│ 4. 独立训练基准计算                                      │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│                 联邦学习训练循环                           │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│ 步骤1: 客户端选择                                        │
+├─────────────────────────────────────────────────────────┤
+│ • 基于会员等级和贡献度计算优先级                           │
+│ • 高优先级客户端优先被选中                                │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│ 步骤2: 模型分发（差异化）                                 │
+├─────────────────────────────────────────────────────────┤
+│ • 根据客户端贡献度分发不同质量的个性化模型                  │
+│ • 贡献度=0：仅本地模型                                   │
+│ • 贡献度>0：根据贡献度获取其他客户端更新                    │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│ 步骤3: 本地训练                                         │
+├─────────────────────────────────────────────────────────┤
+│ • 客户端在本地数据上训练                                  │
+│ • 记录训练时间和性能指标                                  │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│ 步骤4: AMAC贡献度计算                                    │
+├─────────────────────────────────────────────────────────┤
+│ • Ci(t) = (1-λ(t))·Sdir + λ(t)·Sconv                   │
+│ • λ(t) = min(1, t/T)                                   │
+│ • Sdir: 方向贡献分（余弦相似度）                          │
+│ • Sconv: 收敛贡献分（梯度幅度）                          │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│ 步骤5: 时间片积分更新                                     │
+├─────────────────────────────────────────────────────────┤
+│ • 更新当前时间片内的贡献积分                              │
+│ • 清理过期积分                                          │
+│ • 更新会员等级                                          │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│ 步骤6: 全局模型更新                                       │
+├─────────────────────────────────────────────────────────┤
+│ • 基于贡献度的加权聚合                                    │
+│ • 更新全局模型                                          │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│                    评估与记录                            │
+├─────────────────────────────────────────────────────────┤
+│ • 测试准确率计算                                        │
+│ • 时间消耗记录                                          │
+│ • PCC计算（独立vs联邦准确率相关性）                        │
+└─────────────────────────────────────────────────────────┘
 ```
 
-## 🔧 安装与使用
+---
 
-### 环境要求
+## 核心创新 / Core Innovation
+
+### 1. AMAC贡献度计算公式
+
+```
+Ci(t) = (1 - λ(t)) · Sdir(gi, gagg) + λ(t) · Sconv(gi)
+
+其中：
+- λ(t) = min(1, t/T): 自适应权重
+- Sdir: 方向贡献分 = max(0, cosine_similarity(gi, gagg))
+- Sconv: 收敛贡献分 = exp(-γ · ||gi||/G_bar)
+- gi: 客户端i的梯度
+- gagg: 聚合梯度
+- G_bar: 所有客户端梯度幅度均值
+```
+
+### 2. 差异化模型分发策略
+
+```python
+# 伪代码
+def create_personalized_model(client_id, contribution):
+    if contribution == 0:
+        return client_local_model  # 仅返回本地模型
+    
+    # 根据贡献度计算可访问的更新数量
+    accessible_ratio = contribution * level_multiplier
+    num_accessible = int(total_updates * accessible_ratio)
+    
+    # 聚合可访问的更新
+    personalized_model = weighted_aggregate(accessible_updates)
+    return personalized_model
+```
+
+---
+
+## 运行指南 / Running Guide
+
+### 环境要求 / Requirements
+
 ```bash
 Python >= 3.7
 PyTorch >= 1.9.0
 NumPy >= 1.19.5
-Matplotlib >= 3.3.4
-Seaborn >= 0.11.2
 SciPy >= 1.5.0
+tqdm
+matplotlib
+seaborn
 ```
 
-### 安装步骤
+### 基本运行命令 / Basic Commands
+
+#### 1. 运行单个实验 / Run Single Experiment
+
 ```bash
-# 解压项目
-tar -xzf federated_learning_cgsv.tar.gz
-cd federated_learning
+# IID数据分布 + rounds时间片
+python main.py --dataset cifar10 --num_clients 100 --num_rounds 100 --distribution iid --time_slice rounds
 
-# 安装依赖
-pip install -r requirements.txt
+# Non-IID数据分布 + dynamic时间片
+python main.py --dataset mnist --num_clients 50 --num_rounds 80 --distribution non-iid --time_slice dynamic
 ```
 
-### 运行实验
+#### 2. 比较数据分布 / Compare Data Distributions
 
-#### 基础实验
 ```bash
-python main.py \
-    --dataset cifar10 \
-    --num_clients 100 \
-    --num_rounds 100 \
-    --enable_cgsv \
-    --experiment_name cgsv_experiment
+# 比较IID vs Non-IID
+python main.py --dataset cifar10 --compare_distributions
 ```
 
-#### 对比实验（标准 vs CGSV）
+#### 3. 比较时间片方法 / Compare Time Slice Methods
+
 ```bash
-python main.py \
-    --dataset cifar10 \
-    --num_clients 100 \
-    --num_rounds 100 \
-    --compare_methods
+# 比较5种时间片方法
+python main.py --dataset mnist --distribution iid --compare_time_slices
 ```
 
-## 📈 实验结果分析
+#### 4. 比较不同数据集 / Compare Different Datasets
 
-### 生成的可视化图表
+```bash
+# 比较MNIST, Fashion-MNIST, CIFAR-10
+python main.py --compare_datasets --distribution iid --time_slice rounds
+```
 
-1. **训练曲线** (`training_curves.png`)
-   - 模型准确率、损失、参与率、系统活跃度
-   - 质量差距（高贡献度 vs 低贡献度客户端）
+### 参数说明 / Parameter Description
 
-2. **激励机制评价指标** (`incentive_metrics.png`)
-   - 贡献-回报相关性曲线
-   - 公平性指数变化
-   - 激励有效性趋势
-   - 综合雷达图
+| 参数 / Parameter | 类型 / Type | 默认值 / Default | 说明 / Description |
+|-----------------|-------------|-----------------|-------------------|
+| --dataset | str | cifar10 | 数据集选择 (mnist/fashion-mnist/cifar10/cifar100) |
+| --num_clients | int | 100 | 客户端数量 |
+| --num_rounds | int | 100 | 训练轮次 |
+| --distribution | str | iid | 数据分布类型 (iid/non-iid) |
+| --time_slice | str | rounds | 时间片类型 (rounds/days/phases/dynamic/completion) |
+| --experiment_name | str | auto | 实验名称（自动生成） |
+| --seed | int | 42 | 随机种子 |
+| --device | str | auto | 计算设备 (auto/cpu/cuda) |
 
-3. **贡献度-性能散点图** (`contribution_performance.png`)
-   - 展示不同阶段的贡献度与模型性能关系
-   - 包含趋势线拟合
+---
 
-4. **综合报告** (`comprehensive_report.png`)
-   - 所有关键指标的总结
-   - 统计表格和可视化
+## 实验配置 / Experiment Configuration
 
-## 🎯 关键创新点
+### 时间片类型说明 / Time Slice Types
 
-### 1. 基于CGSV的贡献度评估
+1. **rounds**: 基于固定轮次数
+   - 每N轮为一个时间片
+
+2. **days**: 基于实际天数
+   - 每M天为一个时间片
+
+3. **phases**: 基于训练阶段
+   - 分为预训练、微调等阶段
+
+4. **dynamic**: 动态调整
+   - 根据系统活跃度调整时间片长度
+
+5. **completion**: 基于任务完成度
+   - 按照训练进度百分比划分
+
+### 数据分布配置 / Data Distribution Configuration
+
+- **IID (独立同分布)**: 
+  - 数据随机均匀分配给客户端
+  - 每个客户端数据分布相似
+
+- **Non-IID (非独立同分布)**: 
+  - 使用Dirichlet分布
+  - α参数控制异质性程度（默认0.5）
+
+---
+
+## 评价指标 / Evaluation Metrics
+
+### 1. 测试准确率 / Test Accuracy
+- 全局模型在测试集上的准确率
+- 记录每轮的准确率变化
+
+### 2. 时间消耗 / Time Consumption
+- 每轮训练时间
+- 总训练时间
+- 平均每轮时间
+
+### 3. 皮尔逊相关系数 (PCC) / Pearson Correlation Coefficient
+
+**计算方法**:
+1. 收集所有客户端的独立训练准确率（standalone_accuracy）
+2. 收集所有客户端的联邦学习最终准确率（federated_accuracy）
+3. 计算两个向量的相关系数
+
+**解释**:
+- PCC ≈ 1: 强正相关（理想情况）
+- PCC > 0.8: 强相关
+- 0.5 < PCC < 0.8: 中等相关
+- PCC < 0.5: 弱相关
+
+**可视化**:
+- 散点图显示独立vs联邦准确率
+- 回归线显示相关性趋势
+- 柱状图显示性能提升分布
+
+---
+
+## 输出文件说明 / Output Files
+
+```
+outputs/
+├── results/           # 实验结果
+│   ├── {experiment_name}_metrics.json    # 详细指标
+│   └── {experiment_name}_config.json     # 实验配置
+├── plots/            # 可视化图表
+│   ├── {experiment_name}_pcc_analysis.png      # PCC分析图
+│   ├── {experiment_name}_training_curves.png   # 训练曲线
+│   └── {experiment_name}_contribution_heatmap.png # 贡献度热力图
+└── logs/             # 日志文件
+    └── experiment.log
+```
+
+---
+
+## 常见问题 / FAQ
+
+**Q: 如何调整AMAC参数？**
+A: 修改`AMACContributionCalculator`的初始化参数：
+- T: 转折点轮次（默认200）
+- gamma: 收敛分数敏感度（默认1.0）
+
+**Q: 如何修改会员等级阈值？**
+A: 在`config.py`中修改`LEVEL_THRESHOLDS`：
 ```python
-# 计算梯度余弦相似度
-similarity = cosine_similarity(client_gradient, global_gradient)
-contribution = (similarity + 1) / 2  # 映射到[0,1]
+LEVEL_THRESHOLDS = {
+    'bronze': 0,
+    'silver': 2000,
+    'gold': 6000,
+    'diamond': 15000
+}
 ```
 
-### 2. 差异化模型生成
-```python
-# 根据贡献度决定可访问的客户端更新数量
-num_accessible = int(contribution * num_total_clients)
-# 贡献度为0只能获得本地模型
-if contribution == 0:
-    return local_model
+**Q: 如何添加新的数据集？**
+A: 在`datasets/data_loader.py`中添加新的加载函数，并在`DatasetConfig`中注册。
+
+---
+
+## 联系方式 / Contact
+
+如有问题或建议，请提交Issue或Pull Request。
+
+---
+
+## 引用 / Citation
+
+如果使用本代码，请引用：
+```bibtex
+@software{fl_amac_2024,
+  title = {Federated Learning with AMAC and Differentiated Model Distribution},
+  year = {2024}
+}
 ```
-
-### 3. 多维度评价体系
-- 不仅评估最终性能，还评估过程公平性
-- 动态跟踪激励机制的长期效果
-- 可视化贡献与回报的关系演变
-
-## 📊 预期改进效果
-
-相比原始激励机制，CGSV方法预期带来：
-- **准确率提升**: 3-5%
-- **收敛速度加快**: 15-20%
-- **贡献-回报相关性**: > 0.8
-- **公平性指数**: > 0.85
-- **参与积极性提升**: 20-30%
-
-## 🔍 实验参数说明
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--enable_cgsv` | False | 启用CGSV贡献度评估 |
-| `--contribution_weight` | 0.7 | 贡献度在优先级计算中的权重 |
-| `--min_accessible_ratio` | 0.1 | 最低可访问客户端比例 |
-| `--quality_gap_threshold` | 0.1 | 质量差距警告阈值 |
-
-## 📝 注意事项
-
-1. **计算开销**: CGSV计算需要额外的梯度计算，会增加约20%的计算时间
-2. **内存需求**: 需要存储所有客户端的梯度向量，内存需求增加
-3. **参数调优**: 贡献度权重需要根据具体场景调整
-
-## 🤝 贡献
-
-欢迎提出问题和改进建议！
-
-## 📄 License
-
-MIT License

@@ -1,276 +1,212 @@
 """
 incentive/points_calculator.py
-积分计算器 - 使用CGSV方法 / Points Calculator - Using CGSV Method
+AMAC贡献度计算器 / AMAC Contribution Calculator
+基于自适应幅度感知的贡献度量 / Based on Adaptive Magnitude-Aware Contribution
 """
 
 import torch
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Optional, List, Tuple
 from datetime import datetime
-import copy
 
 
-class CGSVCalculator:
+class AMACContributionCalculator:
     """
-    CGSV (Cosine Gradient Shapley Value) 计算器
-    CGSV Calculator for contribution evaluation
-    基于余弦相似度的梯度Shapley值计算客户端贡献度
-    Calculate client contributions based on cosine similarity of gradients
-    """
-    
-    def __init__(self):
-        """初始化CGSV计算器 / Initialize CGSV calculator"""
-        self.gradient_cache = {}  # 缓存梯度信息 / Cache gradient information
-        self.contribution_history = {}  # 贡献历史 / Contribution history
-        
-    def compute_gradient_vector(self, model_weights: Dict, 
-                               prev_weights: Dict) -> np.ndarray:
-        """
-        计算模型更新的梯度向量 / Compute gradient vector from model updates
-        
-        Args:
-            model_weights: 更新后的模型权重 / Updated model weights
-            prev_weights: 更新前的模型权重 / Previous model weights
-            
-        Returns:
-            梯度向量 / Gradient vector
-        """
-        gradients = []
-        
-        for key in model_weights.keys():
-            if key in prev_weights:
-                # 计算参数差异作为梯度 / Calculate parameter difference as gradient
-                grad = model_weights[key] - prev_weights[key]
-                # 展平并转换为numpy数组 / Flatten and convert to numpy array
-                gradients.append(grad.cpu().numpy().flatten())
-        
-        # 连接所有梯度为一个向量 / Concatenate all gradients into one vector
-        gradient_vector = np.concatenate(gradients)
-        
-        return gradient_vector
-    
-    def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        """
-        计算两个向量的余弦相似度 / Calculate cosine similarity between two vectors
-        
-        Args:
-            vec1: 向量1 / Vector 1
-            vec2: 向量2 / Vector 2
-            
-        Returns:
-            余弦相似度 / Cosine similarity
-        """
-        # 避免除零错误 / Avoid division by zero
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        
-        # 计算余弦相似度 / Calculate cosine similarity
-        similarity = np.dot(vec1, vec2) / (norm1 * norm2)
-        
-        # 确保在[-1, 1]范围内 / Ensure within [-1, 1] range
-        return np.clip(similarity, -1.0, 1.0)
-    
-    def calculate_cgsv_contributions(self, client_gradients: Dict[int, np.ndarray],
-                                    global_gradient: np.ndarray) -> Dict[int, float]:
-        """
-        计算基于CGSV的客户端贡献度 / Calculate CGSV-based client contributions
-        
-        Args:
-            client_gradients: 客户端梯度字典 / Client gradients dictionary
-            global_gradient: 全局梯度 / Global gradient
-            
-        Returns:
-            客户端贡献度字典 / Client contribution dictionary
-        """
-        contributions = {}
-        
-        # 计算每个客户端梯度与全局梯度的余弦相似度 / Calculate cosine similarity for each client
-        for client_id, client_grad in client_gradients.items():
-            similarity = self.cosine_similarity(client_grad, global_gradient)
-            
-            # 将相似度转换为贡献度分数 (映射到[0,1]) / Convert similarity to contribution score
-            # 使用(similarity + 1) / 2 将[-1, 1]映射到[0, 1]
-            contribution_score = (similarity + 1) / 2
-            
-            contributions[client_id] = contribution_score
-        
-        # 归一化贡献度 / Normalize contributions
-        total_contribution = sum(contributions.values())
-        if total_contribution > 0:
-            for client_id in contributions:
-                contributions[client_id] /= total_contribution
-        
-        return contributions
-    
-    def calculate_shapley_value(self, client_gradients: Dict[int, np.ndarray],
-                               target_gradient: np.ndarray,
-                               client_id: int,
-                               num_samples: int = 10) -> float:
-        """
-        计算单个客户端的Shapley值 / Calculate Shapley value for a single client
-        使用蒙特卡洛采样近似计算 / Use Monte Carlo sampling for approximation
-        
-        Args:
-            client_gradients: 所有客户端的梯度 / All client gradients
-            target_gradient: 目标梯度 / Target gradient
-            client_id: 要计算的客户端ID / Client ID to calculate
-            num_samples: 采样次数 / Number of samples
-            
-        Returns:
-            Shapley值 / Shapley value
-        """
-        other_clients = [cid for cid in client_gradients.keys() if cid != client_id]
-        marginal_contributions = []
-        
-        for _ in range(num_samples):
-            # 随机排列其他客户端 / Random permutation of other clients
-            np.random.shuffle(other_clients)
-            
-            # 随机选择子集大小 / Randomly choose subset size
-            subset_size = np.random.randint(0, len(other_clients) + 1)
-            subset = other_clients[:subset_size]
-            
-            # 计算加入该客户端前的联盟值 / Calculate coalition value before adding client
-            if subset:
-                coalition_grad = np.mean([client_gradients[cid] for cid in subset], axis=0)
-                value_without = self.cosine_similarity(coalition_grad, target_gradient)
-            else:
-                value_without = 0
-            
-            # 计算加入该客户端后的联盟值 / Calculate coalition value after adding client
-            subset_with = subset + [client_id]
-            coalition_grad_with = np.mean([client_gradients[cid] for cid in subset_with], axis=0)
-            value_with = self.cosine_similarity(coalition_grad_with, target_gradient)
-            
-            # 边际贡献 / Marginal contribution
-            marginal_contributions.append(value_with - value_without)
-        
-        # 返回平均边际贡献作为Shapley值 / Return average marginal contribution as Shapley value
-        return np.mean(marginal_contributions)
-
-
-class PointsCalculator:
-    """
-    积分计算器 / Points Calculator
-    基于CGSV贡献度计算客户端积分
-    Calculate client points based on CGSV contributions
+    AMAC (Adaptive Magnitude-Aware Contribution) 贡献度计算器
+    自适应幅度感知贡献度计算，解决CGSV的贡献递减问题
+    Adaptive contribution calculation addressing the diminishing returns problem of CGSV
     """
     
-    def __init__(self):
-        """初始化积分计算器 / Initialize points calculator"""
-        self.cgsv_calculator = CGSVCalculator()
-        self.points_history = {}
+    def __init__(self, T: int = 200, gamma: float = 1.0, epsilon: float = 1e-8):
+        """
+        初始化AMAC计算器 / Initialize AMAC calculator
+        
+        Args:
+            T: 转折点轮次，λ(t)在此轮次达到1 / Transition round where λ(t) reaches 1
+            gamma: 幅度得分敏感度参数 / Magnitude score sensitivity parameter
+            epsilon: 防止除零的小常数 / Small constant to prevent division by zero
+        """
+        self.T = T
+        self.gamma = gamma
+        self.epsilon = epsilon
+        
+        # 贡献历史记录 / Contribution history
         self.contribution_history = {}
+        self.gradient_norms_history = []
         
-        # 积分计算参数 / Points calculation parameters
-        self.base_points = 1000  # 基础积分 / Base points
-        self.max_bonus_multiplier = 3.0  # 最大奖励倍数 / Maximum bonus multiplier
-        
-    def calculate_points_with_cgsv(self, client_gradients: Dict[int, np.ndarray],
-                                  global_gradient: np.ndarray,
-                                  client_infos: Dict[int, Dict]) -> Dict[int, float]:
+    def calculate_adaptive_weight(self, round_num: int) -> float:
         """
-        使用CGSV计算所有客户端的积分 / Calculate points for all clients using CGSV
+        计算自适应权重λ(t) / Calculate adaptive weight λ(t)
+        
+        在训练初期(t→0)时λ(t)→0，主要关注方向
+        在训练后期(t≥T)时λ(t)→1，主要关注收敛性
         
         Args:
-            client_gradients: 客户端梯度字典 / Client gradients dictionary
-            global_gradient: 全局梯度 / Global gradient
-            client_infos: 客户端信息字典 / Client information dictionary
+            round_num: 当前训练轮次 / Current training round
             
         Returns:
-            客户端积分字典 / Client points dictionary
+            自适应权重 / Adaptive weight
         """
-        # 计算CGSV贡献度 / Calculate CGSV contributions
-        contributions = self.cgsv_calculator.calculate_cgsv_contributions(
-            client_gradients, global_gradient
-        )
-        
-        points = {}
-        for client_id, contribution in contributions.items():
-            # 基础积分 = 贡献度 * 基础积分值 / Base points = contribution * base points value
-            base_points = contribution * self.base_points
-            
-            # 考虑数据量和计算时间的额外奖励 / Consider data size and computation time bonuses
-            info = client_infos.get(client_id, {})
-            data_bonus = min(info.get('num_samples', 0) / 1000, 1.0) * 200
-            time_bonus = min(info.get('computation_time', 0) / 10, 1.0) * 100
-            
-            # 等级倍数 / Level multiplier
-            level_multiplier = info.get('level_multiplier', 1.0)
-            
-            # 总积分 / Total points
-            total_points = (base_points + data_bonus + time_bonus) * level_multiplier
-            
-            points[client_id] = total_points
-            
-            # 记录贡献度历史 / Record contribution history
-            if client_id not in self.contribution_history:
-                self.contribution_history[client_id] = []
-            self.contribution_history[client_id].append(contribution)
-        
-        return points
+        return min(1.0, round_num / self.T)
     
-    def calculate_gradient_based_reward(self, contribution: float) -> float:
+    def calculate_direction_score(self, gi: torch.Tensor, gagg: torch.Tensor) -> float:
         """
-        根据贡献度计算梯度奖励 / Calculate gradient-based reward from contribution
+        计算方向贡献分Sdir / Calculate direction contribution score
+        使用平滑的余弦相似度，增加鲁棒性
+        Using smoothed cosine similarity for robustness
         
         Args:
-            contribution: CGSV贡献度 (0-1) / CGSV contribution (0-1)
+            gi: 客户端i的梯度 / Gradient of client i
+            gagg: 聚合梯度 / Aggregated gradient
             
         Returns:
-            奖励倍数 / Reward multiplier
+            方向贡献分 / Direction contribution score
         """
-        # 使用非线性函数映射贡献度到奖励 / Use non-linear function to map contribution to reward
-        # 贡献度越高，奖励增长越快 / Higher contribution leads to faster reward growth
-        reward_multiplier = 1.0 + (self.max_bonus_multiplier - 1.0) * (contribution ** 2)
+        # 将梯度展平为一维向量 / Flatten gradients to 1D vectors
+        gi_flat = torch.cat([g.flatten() for g in gi.values()]) if isinstance(gi, dict) else gi.flatten()
+        gagg_flat = torch.cat([g.flatten() for g in gagg.values()]) if isinstance(gagg, dict) else gagg.flatten()
         
-        return reward_multiplier
+        # 计算平滑余弦相似度 / Calculate smoothed cosine similarity
+        dot_product = torch.dot(gi_flat, gagg_flat).item()
+        norm_gi = torch.norm(gi_flat).item() + self.epsilon
+        norm_gagg = torch.norm(gagg_flat).item() + self.epsilon
+        
+        cosine_sim = dot_product / (norm_gi * norm_gagg)
+        
+        # 确保非负（排除完全相反方向的贡献）/ Ensure non-negative (exclude opposite directions)
+        return max(0.0, cosine_sim)
     
-    def record_points(self, client_id: int, round_num: int, points: float) -> None:
+    def calculate_convergence_score(self, gi: torch.Tensor, G_bar: float) -> float:
         """
-        记录积分历史 / Record points history
+        计算收敛贡献分Sconv / Calculate convergence contribution score
+        梯度幅度越小，收敛性越好，得分越高
+        Smaller gradient magnitude indicates better convergence, higher score
+        
+        Args:
+            gi: 客户端i的梯度 / Gradient of client i
+            G_bar: 所有客户端梯度幅度的均值 / Mean gradient magnitude of all clients
+            
+        Returns:
+            收敛贡献分 / Convergence contribution score
+        """
+        # 计算梯度幅度 / Calculate gradient magnitude
+        gi_flat = torch.cat([g.flatten() for g in gi.values()]) if isinstance(gi, dict) else gi.flatten()
+        norm_gi = torch.norm(gi_flat).item()
+        
+        # 使用归一化的指数衰减函数 / Use normalized exponential decay function
+        normalized_norm = norm_gi / (G_bar + self.epsilon)
+        score = np.exp(-self.gamma * normalized_norm)
+        
+        return score
+    
+    def calculate_contribution(self, client_id: int, round_num: int,
+                             client_gradient: Dict[str, torch.Tensor],
+                             aggregated_gradient: Dict[str, torch.Tensor],
+                             all_gradients: List[Dict[str, torch.Tensor]]) -> float:
+        """
+        计算客户端的AMAC贡献度 / Calculate client's AMAC contribution
+        
+        公式: Ci(t) = (1 - λ(t)) · Sdir(gi, gagg) + λ(t) · Sconv(gi)
         
         Args:
             client_id: 客户端ID / Client ID
-            round_num: 轮次 / Round number
-            points: 获得的积分 / Points earned
+            round_num: 当前轮次 / Current round
+            client_gradient: 客户端梯度 / Client gradient
+            aggregated_gradient: 聚合梯度 / Aggregated gradient
+            all_gradients: 所有客户端的梯度列表 / List of all client gradients
+            
+        Returns:
+            AMAC贡献度 / AMAC contribution
         """
-        if client_id not in self.points_history:
-            self.points_history[client_id] = []
+        # 计算自适应权重 / Calculate adaptive weight
+        lambda_t = self.calculate_adaptive_weight(round_num)
         
-        self.points_history[client_id].append({
+        # 计算方向贡献分 / Calculate direction score
+        s_dir = self.calculate_direction_score(client_gradient, aggregated_gradient)
+        
+        # 计算所有客户端的梯度幅度均值 / Calculate mean gradient magnitude
+        gradient_norms = []
+        for grad in all_gradients:
+            grad_flat = torch.cat([g.flatten() for g in grad.values()])
+            gradient_norms.append(torch.norm(grad_flat).item())
+        G_bar = np.mean(gradient_norms)
+        
+        # 计算收敛贡献分 / Calculate convergence score
+        s_conv = self.calculate_convergence_score(client_gradient, G_bar)
+        
+        # 计算最终贡献度 / Calculate final contribution
+        contribution = (1 - lambda_t) * s_dir + lambda_t * s_conv
+        
+        # 记录贡献历史 / Record contribution history
+        if client_id not in self.contribution_history:
+            self.contribution_history[client_id] = []
+        
+        self.contribution_history[client_id].append({
             'round': round_num,
-            'points': points,
+            'contribution': contribution,
+            'lambda_t': lambda_t,
+            's_dir': s_dir,
+            's_conv': s_conv,
             'timestamp': datetime.now()
         })
+        
+        return contribution
     
-    def get_contribution_stats(self, client_id: int) -> Dict:
+    def get_client_contribution_history(self, client_id: int) -> List[Dict]:
         """
-        获取客户端贡献统计 / Get client contribution statistics
+        获取客户端贡献历史 / Get client contribution history
         
         Args:
             client_id: 客户端ID / Client ID
             
         Returns:
-            贡献统计信息 / Contribution statistics
+            贡献历史列表 / Contribution history list
         """
-        if client_id not in self.contribution_history:
-            return {
-                'avg_contribution': 0,
-                'max_contribution': 0,
-                'min_contribution': 0,
-                'total_rounds': 0
-            }
+        return self.contribution_history.get(client_id, [])
+    
+    def get_contribution_statistics(self) -> Dict:
+        """
+        获取贡献度统计信息 / Get contribution statistics
         
-        contributions = self.contribution_history[client_id]
+        Returns:
+            统计信息字典 / Statistics dictionary
+        """
+        all_contributions = []
+        for client_history in self.contribution_history.values():
+            for record in client_history:
+                all_contributions.append(record['contribution'])
+        
+        if not all_contributions:
+            return {}
         
         return {
-            'avg_contribution': np.mean(contributions),
-            'max_contribution': np.max(contributions),
-            'min_contribution': np.min(contributions),
-            'total_rounds': len(contributions),
-            'recent_contribution': contributions[-1] if contributions else 0
+            'mean': np.mean(all_contributions),
+            'std': np.std(all_contributions),
+            'min': np.min(all_contributions),
+            'max': np.max(all_contributions),
+            'total_evaluations': len(all_contributions)
         }
+    
+    def calculate_time_slice_contribution(self, client_id: int, 
+                                         slice_start: int, 
+                                         slice_end: int) -> float:
+        """
+        计算时间片内的累积贡献度 / Calculate cumulative contribution within time slice
+        
+        Args:
+            client_id: 客户端ID / Client ID
+            slice_start: 时间片开始轮次 / Time slice start round
+            slice_end: 时间片结束轮次 / Time slice end round
+            
+        Returns:
+            时间片内的累积贡献度 / Cumulative contribution within time slice
+        """
+        if client_id not in self.contribution_history:
+            return 0.0
+        
+        slice_contribution = 0.0
+        for record in self.contribution_history[client_id]:
+            if slice_start <= record['round'] <= slice_end:
+                slice_contribution += record['contribution']
+        
+        return slice_contribution
