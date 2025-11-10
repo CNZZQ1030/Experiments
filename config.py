@@ -1,5 +1,5 @@
 """
-配置文件 / Configuration File
+配置文件 / Configuration File (已修正差异化模型配置)
 包含所有实验参数和系统设置
 Contains all experimental parameters and system settings
 """
@@ -94,28 +94,61 @@ class IncentiveConfig:
     # 启用差异化模型奖励 / Enable differentiated model rewards
     ENABLE_TIERED_REWARDS = True
     
-    # 质量调制因子 / Quality modulation factors
-    # 所有等级基于全局模型，通过质量因子进行调制
-    QUALITY_FACTORS = {
-        'diamond': 1.00,   # 100%质量 - 完整全局模型
-        'gold': 0.95,      # 95%质量
-        'silver': 0.90,    # 90%质量
-        'bronze': 0.85     # 85%质量
+    # ===== 差异化策略说明 / Differentiation Strategy =====
+    # 
+    # 实现方式: 基于访问控制的个性化模型聚合
+    # Implementation: Personalized model aggregation based on access control
+    # 
+    # 核心机制 / Core Mechanism:
+    # 1. 贡献度 = 0: 
+    #    - 只能使用自己的本地模型（最低保障）
+    #    - Only get local model (minimum guarantee)
+    # 
+    # 2. 贡献度 > 0:
+    #    - 可以访问其他客户端的模型更新
+    #    - Can access other clients' model updates
+    #    - 访问数量由贡献度和会员等级共同决定
+    #    - Number of accessible updates determined by contribution and level
+    # 
+    # 3. 聚合方式:
+    #    - 对可访问的更新进行加权聚合（按贡献度加权）
+    #    - Weighted aggregation of accessible updates (weighted by contribution)
+    #    - 贡献度高的更新获得更大权重
+    #    - Updates with higher contribution get larger weights
+    #
+    # 示例 / Example:
+    # - Bronze级，贡献度0.2: 只能访问最好的1-2个更新
+    #   Bronze level, contribution 0.2: Access only 1-2 best updates
+    # - Diamond级，贡献度0.8: 可以访问几乎所有更新
+    #   Diamond level, contribution 0.8: Access almost all updates
+    # 
+    # ===================================================================
+    
+    # 等级访问比例 / Level access ratios
+    # 控制不同等级客户端能访问的更新比例
+    # Control the ratio of updates accessible by different levels
+    LEVEL_ACCESS_RATIOS = {
+        'diamond': 1.0,   # 可访问100%的可用更新 / Access 100% of available updates
+        'gold': 0.8,      # 可访问80%的可用更新 / Access 80% of available updates
+        'silver': 0.6,    # 可访问60%的可用更新 / Access 60% of available updates
+        'bronze': 0.4     # 可访问40%的可用更新 / Access 40% of available updates
     }
     
-    # 噪声水平配置 / Noise level configuration
-    # 用于降低模型质量的噪声强度
-    NOISE_LEVELS = {
-        'diamond': 0.00,   # 无噪声
-        'gold': 0.01,      # 微小噪声
-        'silver': 0.02,    # 中等噪声
-        'bronze': 0.03     # 较大噪声
-    }
+    # 有效访问比例计算权重 / Effective access ratio calculation weights
+    # 有效访问比例 = 贡献度 × CONTRIBUTION_WEIGHT + 等级比例 × LEVEL_WEIGHT
+    # Effective access ratio = contribution × CONTRIBUTION_WEIGHT + level_ratio × LEVEL_WEIGHT
+    CONTRIBUTION_WEIGHT = 0.7  # 贡献度权重70% / Contribution weight 70%
+    LEVEL_WEIGHT = 0.3         # 等级权重30% / Level weight 30%
+    
+    # 最小保障访问数量 / Minimum guaranteed access
+    # 即使贡献度很低，也至少能访问这么多更新（包括自己的）
+    # Even with low contribution, can access at least this many updates (including own)
+    MIN_ACCESSIBLE_UPDATES = 1
     
     # 贡献-回报相关性计算参数
     # Contribution-Reward Correlation parameters
     CRC_WINDOW_SIZE = 10  # 计算相关性的窗口大小（轮次数）
-    CRC_MIN_SAMPLES = 3   # 计算相关性所需的最小样本数（降低到3，更早开始计算）
+    CRC_MIN_SAMPLES = 3   # 计算相关性所需的最小样本数
     CRC_START_ROUND = 1   # 从第1轮开始尝试计算CRC
 
 # =====================================
@@ -214,14 +247,14 @@ class ExperimentConfig:
     PLOT_FORMATS = ["png", "pdf"]  # 图片保存格式 / Image save formats
     
     # 输出路径配置
-    BASE_OUTPUT_DIR = "/root/zzq_projects/2025/Hot_Pot_Incentive/Experiments/outputs"
+    BASE_OUTPUT_DIR = "outputs"
     CHECKPOINT_DIR = f"{BASE_OUTPUT_DIR}/checkpoints"
     LOG_DIR = f"{BASE_OUTPUT_DIR}/logs" 
     PLOTS_DIR = f"{BASE_OUTPUT_DIR}/plots" 
 
 # =====================================
 # 创建必要的目录 / Create necessary directories
-# ====================================
+# =====================================
 
 def setup_directories():
     """创建输出目录 / Create output directories"""
