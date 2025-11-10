@@ -1,6 +1,8 @@
 """
 federated/client.py
-联邦学习客户端（使用本地测试集）/ Federated Learning Client (with Local Test Set)
+联邦学习客户端 / Federated Learning Client
+每个客户端拥有独立的训练集和测试集
+Each client has independent training and test sets
 """
 
 import torch
@@ -15,12 +17,13 @@ from typing import Dict, Optional, Tuple
 class FederatedClient:
     """
     联邦学习客户端 / Federated Learning Client
-    使用本地测试集进行评估，支持独立训练基准计算
-    Uses local test set for evaluation, supports standalone training baseline
+    支持独立训练和联邦学习训练
+    Supports standalone training and federated learning training
     """
     
     def __init__(self, client_id: int, model: nn.Module, 
                  train_dataloader: DataLoader, test_dataloader: DataLoader,
+                 num_train_samples: int, num_test_samples: int,
                  device: torch.device = torch.device("cpu")):
         """
         初始化客户端 / Initialize client
@@ -28,29 +31,33 @@ class FederatedClient:
         Args:
             client_id: 客户端ID / Client ID
             model: 模型 / Model
-            train_dataloader: 训练数据加载器（客户端本地训练集）/ Training data loader (client's local train set)
-            test_dataloader: 测试数据加载器（客户端本地测试集）/ Test data loader (client's local test set)
+            train_dataloader: 训练数据加载器 / Training dataloader
+            test_dataloader: 测试数据加载器 / Test dataloader
+            num_train_samples: 训练样本数 / Number of training samples
+            num_test_samples: 测试样本数 / Number of test samples
             device: 计算设备 / Computing device
         """
         self.client_id = client_id
         self.model = copy.deepcopy(model).to(device)
         self.train_dataloader = train_dataloader
-        self.test_dataloader = test_dataloader  # 客户端自己的测试集 / Client's own test set
+        self.test_dataloader = test_dataloader
         self.device = device
         
-        # 独立训练基准 / Standalone training baseline
+        # 样本数量 / Sample counts
+        self.num_train_samples = num_train_samples
+        self.num_test_samples = num_test_samples
+        
+        # 独立训练性能 / Standalone performance
         self.standalone_accuracy = None
         self.standalone_loss = None
         self.standalone_model = None
         
-        # 联邦学习性能 / Federated learning performance
+        # 联邦学习性能 / Federated performance
         self.federated_accuracy = None
         self.federated_loss = None
         
         # 训练统计 / Training statistics
         self.training_time = 0
-        self.num_train_samples = len(train_dataloader.dataset) if hasattr(train_dataloader, 'dataset') else 0
-        self.num_test_samples = len(test_dataloader.dataset) if hasattr(test_dataloader, 'dataset') else 0
         
         # 会员等级 / Membership level
         self.membership_level = "bronze"
@@ -58,13 +65,14 @@ class FederatedClient:
         # 贡献度历史 / Contribution history
         self.contribution_history = []
         
-        print(f"Client {client_id} initialized: Train samples={self.num_train_samples}, Test samples={self.num_test_samples}")
+        if client_id < 5:  # 只打印前5个客户端
+            print(f"Client {client_id} initialized: Train={self.num_train_samples}, Test={self.num_test_samples}")
     
     def train_standalone(self, epochs: int = 10, lr: float = 0.01) -> Tuple[float, float]:
         """
-        独立训练（不参与联邦学习）/ Standalone training (without federated learning)
-        在客户端自己的本地测试集上评估
-        Evaluated on client's own local test set
+        独立训练（不参与联邦学习）/ Standalone training
+        在客户端自己的测试集上评估
+        Evaluated on client's own test set
         
         Args:
             epochs: 训练轮次 / Training epochs
@@ -73,14 +81,14 @@ class FederatedClient:
         Returns:
             (独立准确率, 独立损失) / (standalone accuracy, standalone loss)
         """
-        # 创建独立模型副本 / Create standalone model copy
+        # 创建独立模型副本 / Create standalone model
         self.standalone_model = copy.deepcopy(self.model)
         self.standalone_model.train()
         
         optimizer = optim.SGD(self.standalone_model.parameters(), lr=lr, momentum=0.9)
         criterion = nn.CrossEntropyLoss()
         
-        # 训练独立模型 / Train standalone model
+        # 训练 / Training
         for epoch in range(epochs):
             for batch_idx, (data, target) in enumerate(self.train_dataloader):
                 data, target = data.to(self.device), target.to(self.device)
@@ -91,12 +99,13 @@ class FederatedClient:
                 loss.backward()
                 optimizer.step()
         
-        # 在本地测试集上评估独立模型 / Evaluate standalone model on local test set
+        # 在测试集上评估 / Evaluate on test set
         self.standalone_accuracy, self.standalone_loss = self._evaluate_model(
             self.standalone_model, self.test_dataloader
         )
         
-        print(f"Client {self.client_id} - Standalone Accuracy (on local test set): {self.standalone_accuracy:.4f}")
+        if self.client_id < 5:  # 只打印前5个客户端
+            print(f"Client {self.client_id} - Standalone Accuracy: {self.standalone_accuracy:.4f}")
         
         return self.standalone_accuracy, self.standalone_loss
     
@@ -104,25 +113,25 @@ class FederatedClient:
                        epochs: int = 5, lr: float = 0.01) -> Tuple[Dict, Dict]:
         """
         联邦学习训练 / Federated learning training
-        在客户端自己的本地测试集上评估
-        Evaluated on client's own local test set
+        在客户端自己的测试集上评估
+        Evaluated on client's own test set
         
         Args:
-            global_weights: 全局模型权重（可能是个性化的）/ Global model weights (possibly personalized)
+            global_weights: 全局模型权重（可能是个性化的）/ Global model weights
             epochs: 本地训练轮次 / Local training epochs
             lr: 学习率 / Learning rate
             
         Returns:
-            (更新后的模型权重, 训练信息) / (updated model weights, training info)
+            (更新后的模型权重, 训练信息) / (updated weights, training info)
         """
-        # 加载全局模型权重 / Load global model weights
+        # 加载全局模型 / Load global model
         self.model.load_state_dict(global_weights)
         self.model.train()
         
         optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
         criterion = nn.CrossEntropyLoss()
         
-        # 记录训练开始时间 / Record training start time
+        # 记录训练时间 / Record training time
         start_time = time.time()
         
         total_loss = 0
@@ -145,7 +154,7 @@ class FederatedClient:
         # 计算训练时间 / Calculate training time
         self.training_time = time.time() - start_time
         
-        # 在本地测试集上评估联邦学习模型 / Evaluate federated model on local test set
+        # 在测试集上评估 / Evaluate on test set
         self.federated_accuracy, self.federated_loss = self._evaluate_model(
             self.model, self.test_dataloader
         )
@@ -167,11 +176,11 @@ class FederatedClient:
     
     def _evaluate_model(self, model: nn.Module, dataloader: DataLoader) -> Tuple[float, float]:
         """
-        评估模型（在指定的数据加载器上）/ Evaluate model (on specified data loader)
+        评估模型 / Evaluate model
         
         Args:
             model: 要评估的模型 / Model to evaluate
-            dataloader: 数据加载器（本地测试集）/ Data loader (local test set)
+            dataloader: 数据加载器 / Dataloader
             
         Returns:
             (准确率, 损失) / (accuracy, loss)
@@ -198,19 +207,14 @@ class FederatedClient:
         return accuracy, avg_loss
     
     def update_membership_level(self, new_level: str) -> None:
-        """
-        更新会员等级 / Update membership level
-        
-        Args:
-            new_level: 新等级 / New level
-        """
+        """更新会员等级 / Update membership level"""
         self.membership_level = new_level
     
     def get_performance_improvement(self) -> float:
         """
         获取性能改进 / Get performance improvement
-        计算联邦学习相对于独立训练的改进（在本地测试集上）
-        Calculate improvement of federated learning over standalone training (on local test set)
+        计算联邦学习相对于独立训练的改进
+        Calculate improvement of federated over standalone
         
         Returns:
             性能改进百分比 / Performance improvement percentage
@@ -225,6 +229,18 @@ class FederatedClient:
                       / self.standalone_accuracy) * 100
         return improvement
     
+    def get_absolute_improvement(self) -> float:
+        """
+        获取绝对性能改进 / Get absolute performance improvement
+        
+        Returns:
+            绝对改进值 / Absolute improvement value
+        """
+        if self.standalone_accuracy is None or self.federated_accuracy is None:
+            return 0.0
+        
+        return self.federated_accuracy - self.standalone_accuracy
+    
     def get_client_metrics(self) -> Dict:
         """
         获取客户端指标 / Get client metrics
@@ -237,6 +253,7 @@ class FederatedClient:
             'standalone_accuracy': self.standalone_accuracy,
             'federated_accuracy': self.federated_accuracy,
             'performance_improvement': self.get_performance_improvement(),
+            'absolute_improvement': self.get_absolute_improvement(),
             'membership_level': self.membership_level,
             'num_train_samples': self.num_train_samples,
             'num_test_samples': self.num_test_samples,

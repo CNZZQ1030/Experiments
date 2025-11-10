@@ -1,7 +1,8 @@
 """
-experiments/experiment_runner.py
+experiments/run_experiments.py
 实验运行器 / Experiment Runner
-专注于客户端本地性能评估 / Focus on client local performance evaluation
+专注于客户端个性化模型性能评估
+Focus on client personalized model performance evaluation
 """
 
 import torch
@@ -31,13 +32,13 @@ from config import FederatedConfig, IncentiveConfig, DatasetConfig, DEVICE
 class ExperimentRunner:
     """
     实验运行器 / Experiment Runner
-    协调联邦学习实验的执行，专注于客户端本地性能
-    Coordinate federated learning experiment execution, focus on client local performance
+    评估联邦学习激励机制对客户端性能的影响
+    Evaluate impact of federated learning incentive mechanism on client performance
     """
     
     def __init__(self, dataset_name: str, num_clients: int, num_rounds: int,
                  distribution: str = "iid", time_slice_type: str = "rounds",
-                 device: torch.device = None, test_ratio: float = 0.2):
+                 device: torch.device = None):
         """
         初始化实验运行器 / Initialize experiment runner
         
@@ -48,7 +49,6 @@ class ExperimentRunner:
             distribution: 数据分布 (iid/non-iid) / Data distribution
             time_slice_type: 时间片类型 / Time slice type
             device: 计算设备 / Computing device
-            test_ratio: 每个客户端的测试集比例 / Test set ratio for each client
         """
         self.dataset_name = dataset_name
         self.num_clients = num_clients
@@ -56,20 +56,18 @@ class ExperimentRunner:
         self.distribution = distribution
         self.time_slice_type = time_slice_type
         self.device = device or DEVICE
-        self.test_ratio = test_ratio
         
         print(f"\n{'='*70}")
-        print(f"Initializing Experiment / 初始化实验")
+        print(f"Experiment Initialization / 实验初始化")
         print(f"{'='*70}")
         print(f"Dataset / 数据集: {dataset_name}")
         print(f"Clients / 客户端数: {num_clients}")
         print(f"Rounds / 轮次: {num_rounds}")
         print(f"Distribution / 分布: {distribution}")
         print(f"Time Slice / 时间片: {time_slice_type}")
-        print(f"Test Ratio / 测试集比例: {test_ratio*100:.0f}%")
         print(f"Device / 设备: {self.device}")
-        print(f"Note: Each client has its own local train/test split")
-        print(f"注意：每个客户端有自己的本地训练集/测试集")
+        print(f"\nGoal / 目标: Compare standalone vs federated learning performance")
+        print(f"目标: 比较独立训练与联邦学习的性能差异")
         
         # 初始化组件 / Initialize components
         self._initialize_data()
@@ -86,8 +84,7 @@ class ExperimentRunner:
             num_clients=self.num_clients,
             batch_size=FederatedConfig.LOCAL_BATCH_SIZE,
             distribution=self.distribution,
-            alpha=FederatedConfig.NON_IID_ALPHA,
-            test_ratio=self.test_ratio
+            alpha=FederatedConfig.NON_IID_ALPHA
         )
     
     def _initialize_model(self):
@@ -109,11 +106,15 @@ class ExperimentRunner:
         """初始化客户端 / Initialize clients"""
         self.clients = {}
         
-        print("\nInitializing clients with local train/test splits / 初始化客户端（本地训练集/测试集）...")
+        print("\nInitializing clients / 初始化客户端...")
         for client_id in tqdm(range(self.num_clients), desc="Creating clients"):
-            # 获取客户端的训练集和测试集 / Get client's train and test sets
+            # 获取客户端数据 / Get client data
             train_loader = self.data_loader.get_client_train_dataloader(client_id)
             test_loader = self.data_loader.get_client_test_dataloader(client_id)
+            
+            # 获取样本数量 / Get sample counts
+            num_train = self.data_loader.get_num_train_samples(client_id)
+            num_test = self.data_loader.get_num_test_samples(client_id)
             
             # 创建客户端 / Create client
             client = FederatedClient(
@@ -121,12 +122,14 @@ class ExperimentRunner:
                 model=self.model,
                 train_dataloader=train_loader,
                 test_dataloader=test_loader,
+                num_train_samples=num_train,
+                num_test_samples=num_test,
                 device=self.device
             )
             
             self.clients[client_id] = client
         
-        print(f"Created {self.num_clients} clients / 创建了 {self.num_clients} 个客户端")
+        print(f"✓ Created {self.num_clients} clients")
     
     def _initialize_incentive_system(self):
         """初始化激励系统 / Initialize incentive system"""
@@ -143,7 +146,7 @@ class ExperimentRunner:
             level_multipliers=IncentiveConfig.LEVEL_MULTIPLIERS
         )
         
-        # 初始化所有客户端的会员信息 / Initialize membership for all clients
+        # 初始化客户端会员信息 / Initialize client membership
         for client_id in range(self.num_clients):
             self.membership_system.initialize_client(client_id)
     
@@ -154,26 +157,23 @@ class ExperimentRunner:
     
     def calculate_standalone_baselines(self, epochs: int = 10):
         """
-        计算所有客户端的独立训练基准（在各自的本地测试集上）
-        Calculate standalone training baselines for all clients (on their own local test sets)
+        计算独立训练基准 / Calculate standalone baselines
+        每个客户端在各自的测试集上评估
+        Each client evaluated on their own test set
         
         Args:
             epochs: 独立训练轮次 / Standalone training epochs
         """
         print(f"\n{'='*70}")
-        print(f"Computing Standalone Baselines (on local test sets)")
-        print(f"计算独立训练基准（在各自的本地测试集上）")
+        print(f"Computing Standalone Baselines / 计算独立训练基准")
         print(f"{'='*70}")
         
         for client_id, client in tqdm(self.clients.items(), 
                                      desc="Standalone training"):
-            # 独立训练 / Standalone training
             standalone_acc, standalone_loss = client.train_standalone(epochs=epochs)
-            
-            # 记录基准 / Record baseline
             self.metrics_calculator.record_standalone_accuracy(client_id, standalone_acc)
         
-        print("Standalone baselines computed / 独立训练基准计算完成")
+        print("✓ Standalone baselines computed")
     
     def run_single_round(self, round_num: int) -> Dict:
         """
@@ -187,28 +187,27 @@ class ExperimentRunner:
         """
         round_start_time = time.time()
         
-        # 所有客户端都参与训练 / All clients participate
+        # 所有客户端参与 / All clients participate
         selected_clients = list(range(self.num_clients))
         
-        # 重置服务器轮次数据 / Reset server round data
+        # 重置服务器 / Reset server
         self.server.reset_round()
         
-        # 存储当前轮次的客户端准确率 / Store client accuracies for current round
+        # 存储客户端准确率 / Store client accuracies
         client_accuracies = {}
         
         # 客户端训练 / Client training
         if round_num % 10 == 0 or round_num == 1:
-            print(f"\nRound {round_num}: Training all {len(selected_clients)} clients...")
+            print(f"\nRound {round_num}: Training {len(selected_clients)} clients...")
         
-        for client_id in tqdm(selected_clients, desc=f"Round {round_num}", disable=(round_num % 10 != 0 and round_num != 1)):
+        for client_id in tqdm(selected_clients, desc=f"Round {round_num}", 
+                            disable=(round_num % 10 != 0 and round_num != 1)):
             client = self.clients[client_id]
             
-            # 获取个性化模型（基于历史贡献度）/ Get personalized model (based on historical contribution)
+            # 获取个性化模型 / Get personalized model
             if round_num == 1:
-                # 第一轮使用全局模型 / First round uses global model
                 model_weights = self.server.get_global_model_weights()
             else:
-                # 从个性化模型中获取 / Get from personalized models
                 if hasattr(self, 'personalized_models') and client_id in self.personalized_models:
                     model_weights = self.personalized_models[client_id]
                 else:
@@ -224,11 +223,9 @@ class ExperimentRunner:
             # 收集更新 / Collect updates
             self.server.collect_client_updates(client_id, updated_weights, train_info)
             
-            # 记录联邦学习准确率（在本地测试集上）/ Record federated accuracy (on local test set)
+            # 记录准确率 / Record accuracy
             federated_acc = train_info['federated_accuracy']
             self.metrics_calculator.record_federated_accuracy(client_id, federated_acc)
-            
-            # 收集客户端准确率 / Collect client accuracy
             client_accuracies[client_id] = federated_acc
         
         # 分发个性化模型 / Distribute personalized models
@@ -237,13 +234,13 @@ class ExperimentRunner:
         # 更新全局模型 / Update global model
         self.server.update_global_model()
         
-        # 更新时间片和会员等级 / Update time slices and membership levels
+        # 更新激励系统 / Update incentive system
         contributions = self.server.client_contributions
         for client_id, contribution in contributions.items():
             # 更新时间片积分 / Update time slice points
             current_slice = self.time_slice_manager.get_current_slice(round_num)
             self.time_slice_manager.update_client_slice_points(
-                client_id, round_num, contribution * 1000  # 转换为积分
+                client_id, round_num, contribution * 1000
             )
             
             # 获取有效积分 / Get active points
@@ -286,7 +283,7 @@ class ExperimentRunner:
         # 计算独立训练基准 / Calculate standalone baselines
         self.calculate_standalone_baselines(epochs=10)
         
-        # 训练轮次 / Training rounds
+        # 联邦学习训练 / Federated learning training
         print(f"\n{'='*70}")
         print(f"Federated Learning Training / 联邦学习训练")
         print(f"{'='*70}")
@@ -300,9 +297,9 @@ class ExperimentRunner:
                 
                 if 'client_accuracies' in round_metrics:
                     client_accs = list(round_metrics['client_accuracies'].values())
-                    print(f"  Avg Client Accuracy (on local test): {np.mean(client_accs):.4f}")
-                    print(f"  Max Client Accuracy (on local test): {np.max(client_accs):.4f}")
-                    print(f"  Min Client Accuracy (on local test): {np.min(client_accs):.4f}")
+                    print(f"  Avg Accuracy: {np.mean(client_accs):.4f}")
+                    print(f"  Max Accuracy: {np.max(client_accs):.4f}")
+                    print(f"  Min Accuracy: {np.min(client_accs):.4f}")
                 
                 print(f"  Time: {round_metrics['time_consumption']:.2f}s")
                 
@@ -326,13 +323,8 @@ class ExperimentRunner:
         return final_metrics
     
     def _generate_visualizations(self, experiment_name: str):
-        """
-        生成可视化图表 / Generate visualization charts
-        
-        Args:
-            experiment_name: 实验名称 / Experiment name
-        """
-        print("\nGenerating visualizations / 生成可视化图表...")
+        """生成可视化 / Generate visualizations"""
+        print("\nGenerating visualizations / 生成可视化...")
         
         # PCC散点图 / PCC scatter plot
         pcc_data = self.metrics_calculator.get_pcc_visualization_data()
@@ -347,7 +339,6 @@ class ExperimentRunner:
             )
         
         # 训练曲线 / Training curves
-        # 收集贡献度历史 / Collect contribution history
         contributions_history = []
         for round_metric in self.metrics_calculator.round_metrics:
             if 'contributions' in round_metric and round_metric['contributions']:
@@ -365,17 +356,10 @@ class ExperimentRunner:
         
         self.visualizer.plot_training_curves(metrics_history, experiment_name)
         
-        print("Visualizations generated / 可视化图表已生成")
+        print("✓ Visualizations generated")
     
     def _save_results(self, experiment_name: str, final_metrics: Dict):
-        """
-        保存实验结果 / Save experiment results
-        
-        Args:
-            experiment_name: 实验名称 / Experiment name
-            final_metrics: 最终指标 / Final metrics
-        """
-        # 创建结果目录 / Create results directory
+        """保存结果 / Save results"""
         results_dir = "outputs/results"
         os.makedirs(results_dir, exist_ok=True)
         
@@ -383,7 +367,7 @@ class ExperimentRunner:
         metrics_path = os.path.join(results_dir, f"{experiment_name}_metrics.json")
         self.metrics_calculator.save_metrics(metrics_path)
         
-        # 保存实验配置 / Save experiment configuration
+        # 保存配置 / Save configuration
         config_path = os.path.join(results_dir, f"{experiment_name}_config.json")
         config_data = {
             'dataset': self.dataset_name,
@@ -391,58 +375,53 @@ class ExperimentRunner:
             'num_rounds': self.num_rounds,
             'distribution': self.distribution,
             'time_slice_type': self.time_slice_type,
-            'test_ratio': self.test_ratio,
-            'note': 'Each client evaluated on their own local test set',
+            'data_info': {
+                'original_train_samples': self.data_loader.num_train_samples,
+                'original_test_samples': self.data_loader.num_test_samples,
+                'total_train_allocated': sum(self.data_loader.get_num_train_samples(i) 
+                                            for i in range(self.num_clients)),
+                'total_test_allocated': sum(self.data_loader.get_num_test_samples(i) 
+                                           for i in range(self.num_clients))
+            },
             'final_metrics': final_metrics
         }
         
         with open(config_path, 'w') as f:
             json.dump(config_data, f, indent=2, default=str)
         
-        print(f"Results saved to: {results_dir}")
+        print(f"✓ Results saved to: {results_dir}")
 
 
 def compare_experiments(configurations: List[Dict]) -> Dict:
-    """
-    比较不同配置的实验 / Compare experiments with different configurations
-    
-    Args:
-        configurations: 配置列表 / Configuration list
-        
-    Returns:
-        比较结果 / Comparison results
-    """
+    """比较不同配置的实验 / Compare experiments"""
     comparison_results = {}
     
     for config in configurations:
         print(f"\n{'='*70}")
-        print(f"Running Configuration: {config['name']}")
+        print(f"Running: {config['name']}")
         print(f"{'='*70}")
         
-        # 创建实验运行器 / Create experiment runner
         runner = ExperimentRunner(
             dataset_name=config['dataset'],
             num_clients=config['num_clients'],
             num_rounds=config['num_rounds'],
             distribution=config['distribution'],
             time_slice_type=config['time_slice_type'],
-            device=config.get('device', DEVICE),
-            test_ratio=config.get('test_ratio', 0.2)
+            device=config.get('device', DEVICE)
         )
         
-        # 运行实验 / Run experiment
         results = runner.run_experiment(config['name'])
         comparison_results[config['name']] = results
     
-    # 打印比较结果 / Print comparison results
+    # 打印比较 / Print comparison
     print(f"\n{'='*70}")
-    print("Experiment Comparison Summary / 实验比较摘要")
+    print("Comparison Summary / 比较摘要")
     print(f"{'='*70}")
     
     for name, results in comparison_results.items():
         print(f"\n{name}:")
-        print(f"  Avg Client Accuracy: {results['client_accuracy']['avg_final']:.4f}")
-        print(f"  Max Client Accuracy: {results['client_accuracy']['max_final']:.4f}")
+        print(f"  Avg Accuracy: {results['client_accuracy']['avg_final']:.4f}")
+        print(f"  Max Accuracy: {results['client_accuracy']['max_final']:.4f}")
         print(f"  Total Time: {results['time_consumption']['total']:.2f}s")
         print(f"  PCC: {results['pcc']:.4f}")
     

@@ -1,8 +1,8 @@
 """
 数据集加载和预处理模块 / Dataset Loading and Preprocessing Module
-支持MNIST, Fashion-MNIST, CIFAR-10/100, Shakespeare等数据集
-每个客户端拥有独立的训练集和测试集
-Each client has independent training and test sets
+支持MNIST, Fashion-MNIST, CIFAR-10/100等数据集
+将训练集和测试集都分配给客户端
+Both training and test sets are distributed to clients
 """
 
 import torch
@@ -13,17 +13,17 @@ import numpy as np
 from typing import List, Tuple, Dict, Optional
 import random
 
+
 class FederatedDataLoader:
     """
     联邦学习数据加载器 / Federated Learning Data Loader
-    负责数据集的加载、分割和分发 / Responsible for dataset loading, splitting and distribution
-    每个客户端拥有独立的训练集和测试集 / Each client has independent train/test sets
+    每个客户端拥有独立的训练集和测试集
+    Each client has independent training and test sets
     """
     
     def __init__(self, dataset_name: str, num_clients: int, 
                  batch_size: int, data_root: str = "./data",
-                 distribution: str = "iid", alpha: float = 0.5,
-                 test_ratio: float = 0.2):
+                 distribution: str = "iid", alpha: float = 0.5):
         """
         初始化数据加载器 / Initialize data loader
         
@@ -34,7 +34,6 @@ class FederatedDataLoader:
             data_root: 数据根目录 / Data root directory
             distribution: 数据分布类型 ("iid" or "non-iid") / Data distribution type
             alpha: Dirichlet分布参数(用于non-iid) / Dirichlet distribution parameter (for non-iid)
-            test_ratio: 测试集比例 / Test set ratio (default 0.2 = 20%)
         """
         self.dataset_name = dataset_name.lower()
         self.num_clients = num_clients
@@ -42,32 +41,40 @@ class FederatedDataLoader:
         self.data_root = data_root
         self.distribution = distribution
         self.alpha = alpha
-        self.test_ratio = test_ratio
         
         # 加载数据集 / Load dataset
-        self.train_dataset, _ = self._load_dataset()  # 只使用原始训练集
+        self.train_dataset, self.test_dataset = self._load_dataset()
         
         # 获取数据集信息 / Get dataset information
-        self.num_total_samples = len(self.train_dataset)
+        self.num_train_samples = len(self.train_dataset)
+        self.num_test_samples = len(self.test_dataset)
         
         # 为每个客户端创建训练集和测试集索引 / Create train/test indices for each client
         self.client_train_indices = {}
         self.client_test_indices = {}
         self._create_client_data_splits()
         
+        # 计算实际分配的样本统计 / Calculate actual allocated sample statistics
+        total_train_allocated = sum(len(indices) for indices in self.client_train_indices.values())
+        total_test_allocated = sum(len(indices) for indices in self.client_test_indices.values())
+        
         print(f"\n{'='*70}")
-        print(f"Data Distribution: {distribution.upper()}")
-        print(f"Total samples: {self.num_total_samples}")
-        print(f"Test ratio per client: {test_ratio*100:.0f}%")
+        print(f"Federated Data Distribution / 联邦数据分配")
+        print(f"{'='*70}")
+        print(f"Dataset / 数据集: {dataset_name}")
+        print(f"Distribution / 分布: {distribution.upper()}")
+        print(f"Number of clients / 客户端数: {num_clients}")
+        print(f"\nOriginal Dataset / 原始数据集:")
+        print(f"  Training samples / 训练样本: {self.num_train_samples}")
+        print(f"  Test samples / 测试样本: {self.num_test_samples}")
+        print(f"\nAllocated to Clients / 分配给客户端:")
+        print(f"  Total training samples / 训练样本总计: {total_train_allocated}")
+        print(f"  Total test samples / 测试样本总计: {total_test_allocated}")
+        print(f"  Avg per client / 每客户端平均: train={total_train_allocated/num_clients:.0f}, test={total_test_allocated/num_clients:.0f}")
         print(f"{'='*70}")
         
     def _load_dataset(self) -> Tuple[Dataset, Dataset]:
-        """
-        加载指定的数据集 / Load the specified dataset
-        
-        Returns:
-            训练集和测试集（测试集在这里不使用）/ Training set and test set (test set not used here)
-        """
+        """加载指定的数据集 / Load the specified dataset"""
         if self.dataset_name == "mnist":
             return self._load_mnist()
         elif self.dataset_name == "fashion-mnist":
@@ -89,19 +96,11 @@ class FederatedDataLoader:
         ])
         
         train_dataset = datasets.MNIST(
-            root=self.data_root,
-            train=True,
-            download=True,
-            transform=transform
+            root=self.data_root, train=True, download=True, transform=transform
         )
-        
         test_dataset = datasets.MNIST(
-            root=self.data_root,
-            train=False,
-            download=True,
-            transform=transform
+            root=self.data_root, train=False, download=True, transform=transform
         )
-        
         return train_dataset, test_dataset
     
     def _load_fashion_mnist(self) -> Tuple[Dataset, Dataset]:
@@ -112,19 +111,11 @@ class FederatedDataLoader:
         ])
         
         train_dataset = datasets.FashionMNIST(
-            root=self.data_root,
-            train=True,
-            download=True,
-            transform=transform
+            root=self.data_root, train=True, download=True, transform=transform
         )
-        
         test_dataset = datasets.FashionMNIST(
-            root=self.data_root,
-            train=False,
-            download=True,
-            transform=transform
+            root=self.data_root, train=False, download=True, transform=transform
         )
-        
         return train_dataset, test_dataset
     
     def _load_cifar10(self) -> Tuple[Dataset, Dataset]:
@@ -133,30 +124,20 @@ class FederatedDataLoader:
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), 
-                               (0.2023, 0.1994, 0.2010))
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
         ])
         
         transform_test = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), 
-                               (0.2023, 0.1994, 0.2010))
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
         ])
         
         train_dataset = datasets.CIFAR10(
-            root=self.data_root,
-            train=True,
-            download=True,
-            transform=transform_train
+            root=self.data_root, train=True, download=True, transform=transform_train
         )
-        
         test_dataset = datasets.CIFAR10(
-            root=self.data_root,
-            train=False,
-            download=True,
-            transform=transform_test
+            root=self.data_root, train=False, download=True, transform=transform_test
         )
-        
         return train_dataset, test_dataset
     
     def _load_cifar100(self) -> Tuple[Dataset, Dataset]:
@@ -165,44 +146,29 @@ class FederatedDataLoader:
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.5071, 0.4867, 0.4408), 
-                               (0.2675, 0.2565, 0.2761))
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
         ])
         
         transform_test = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize((0.5071, 0.4867, 0.4408), 
-                               (0.2675, 0.2565, 0.2761))
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))
         ])
         
         train_dataset = datasets.CIFAR100(
-            root=self.data_root,
-            train=True,
-            download=True,
-            transform=transform_train
+            root=self.data_root, train=True, download=True, transform=transform_train
         )
-        
         test_dataset = datasets.CIFAR100(
-            root=self.data_root,
-            train=False,
-            download=True,
-            transform=transform_test
+            root=self.data_root, train=False, download=True, transform=transform_test
         )
-        
         return train_dataset, test_dataset
     
     def _load_shakespeare(self) -> Tuple[Dataset, Dataset]:
-        """
-        加载Shakespeare数据集 / Load Shakespeare dataset
-        这里简化为一个示例实现 / This is a simplified example implementation
-        """
+        """加载Shakespeare数据集（示例实现）/ Load Shakespeare dataset (example)"""
         class ShakespeareDataset(Dataset):
-            """简化的Shakespeare数据集类 / Simplified Shakespeare dataset class"""
-            
             def __init__(self, train=True):
-                self.data = torch.randn(1000, 80)
-                self.targets = torch.randint(0, 80, (1000,))
-                
+                self.data = torch.randn(1000 if train else 200, 80)
+                self.targets = torch.randint(0, 80, (1000 if train else 200,))
+            
             def __len__(self):
                 return len(self.data)
             
@@ -212,59 +178,70 @@ class FederatedDataLoader:
         return ShakespeareDataset(train=True), ShakespeareDataset(train=False)
     
     def _create_client_data_splits(self) -> None:
-        """
-        为每个客户端创建独立的训练集和测试集 / Create independent train/test sets for each client
-        """
+        """为每个客户端创建独立的训练集和测试集 / Create independent train/test sets"""
         if self.distribution == "iid":
             self._create_iid_splits()
         else:
             self._create_non_iid_splits()
     
     def _create_iid_splits(self) -> None:
-        """
-        创建IID数据分布的训练/测试集分割 / Create train/test splits for IID data distribution
-        """
-        all_indices = list(range(self.num_total_samples))
-        random.shuffle(all_indices)
+        """创建IID数据分布 / Create IID data distribution"""
+        print(f"\nIID Distribution / IID分布:")
         
-        # 平均分配数据 / Evenly distribute data
-        samples_per_client = self.num_total_samples // self.num_clients
+        # 分配训练集 / Distribute training set
+        train_indices = list(range(self.num_train_samples))
+        random.shuffle(train_indices)
+        train_per_client = self.num_train_samples // self.num_clients
+        
+        # 分配测试集 / Distribute test set
+        test_indices = list(range(self.num_test_samples))
+        random.shuffle(test_indices)
+        test_per_client = self.num_test_samples // self.num_clients
         
         for i in range(self.num_clients):
-            start_idx = i * samples_per_client
-            end_idx = start_idx + samples_per_client
-            if i == self.num_clients - 1:
-                end_idx = self.num_total_samples
+            # 训练集分配 / Training set allocation
+            train_start = i * train_per_client
+            train_end = train_start + train_per_client
+            if i == self.num_clients - 1:  # 最后一个客户端获取剩余所有数据
+                train_end = self.num_train_samples
+            self.client_train_indices[i] = train_indices[train_start:train_end]
             
-            client_indices = all_indices[start_idx:end_idx]
+            # 测试集分配 / Test set allocation
+            test_start = i * test_per_client
+            test_end = test_start + test_per_client
+            if i == self.num_clients - 1:  # 最后一个客户端获取剩余所有数据
+                test_end = self.num_test_samples
+            self.client_test_indices[i] = test_indices[test_start:test_end]
             
-            # 划分训练集和测试集 / Split into train and test
-            num_test = int(len(client_indices) * self.test_ratio)
-            random.shuffle(client_indices)
-            
-            self.client_test_indices[i] = client_indices[:num_test]
-            self.client_train_indices[i] = client_indices[num_test:]
-            
-            print(f"Client {i}: Train={len(self.client_train_indices[i])}, Test={len(self.client_test_indices[i])}")
+            if i < 5:  # 打印前5个客户端的信息
+                print(f"  Client {i}: Train={len(self.client_train_indices[i])}, "
+                      f"Test={len(self.client_test_indices[i])}")
+        
+        if self.num_clients > 5:
+            print(f"  ... (remaining {self.num_clients - 5} clients)")
     
     def _create_non_iid_splits(self) -> None:
-        """
-        创建Non-IID数据分布的训练/测试集分割（使用Dirichlet分布）
-        Create train/test splits for Non-IID data distribution (using Dirichlet distribution)
-        """
-        # 获取标签 / Get labels
+        """创建Non-IID数据分布（使用Dirichlet分布）/ Create Non-IID distribution"""
+        print(f"\nNon-IID Distribution / Non-IID分布 (α={self.alpha}):")
+        
+        # 获取训练集标签 / Get training labels
         if hasattr(self.train_dataset, 'targets'):
-            labels = np.array(self.train_dataset.targets)
+            train_labels = np.array(self.train_dataset.targets)
         else:
-            labels = np.array([self.train_dataset[i][1] for i in range(len(self.train_dataset))])
+            train_labels = np.array([self.train_dataset[i][1] for i in range(len(self.train_dataset))])
         
-        num_classes = len(np.unique(labels))
+        # 获取测试集标签 / Get test labels
+        if hasattr(self.test_dataset, 'targets'):
+            test_labels = np.array(self.test_dataset.targets)
+        else:
+            test_labels = np.array([self.test_dataset[i][1] for i in range(len(self.test_dataset))])
         
-        # 使用Dirichlet分布生成客户端数据分配 / Use Dirichlet distribution
-        client_all_indices = {i: [] for i in range(self.num_clients)}
+        num_classes = len(np.unique(train_labels))
         
+        # 使用Dirichlet分布分配训练集 / Distribute training set using Dirichlet
+        client_train_indices = {i: [] for i in range(self.num_clients)}
         for k in range(num_classes):
-            idx_k = np.where(labels == k)[0]
+            idx_k = np.where(train_labels == k)[0]
             np.random.shuffle(idx_k)
             
             proportions = np.random.dirichlet(np.repeat(self.alpha, self.num_clients))
@@ -272,30 +249,42 @@ class FederatedDataLoader:
             
             idx_splits = np.split(idx_k, proportions)
             for i, idx_split in enumerate(idx_splits):
-                client_all_indices[i].extend(idx_split.tolist())
+                client_train_indices[i].extend(idx_split.tolist())
         
-        # 为每个客户端划分训练集和测试集 / Split train/test for each client
+        # 使用相同策略分配测试集 / Distribute test set using same strategy
+        client_test_indices = {i: [] for i in range(self.num_clients)}
+        for k in range(num_classes):
+            idx_k = np.where(test_labels == k)[0]
+            np.random.shuffle(idx_k)
+            
+            proportions = np.random.dirichlet(np.repeat(self.alpha, self.num_clients))
+            proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
+            
+            idx_splits = np.split(idx_k, proportions)
+            for i, idx_split in enumerate(idx_splits):
+                client_test_indices[i].extend(idx_split.tolist())
+        
+        # 随机打乱每个客户端的数据 / Shuffle each client's data
         for i in range(self.num_clients):
-            client_indices = client_all_indices[i]
-            random.shuffle(client_indices)
+            random.shuffle(client_train_indices[i])
+            random.shuffle(client_test_indices[i])
             
-            num_test = int(len(client_indices) * self.test_ratio)
+            self.client_train_indices[i] = client_train_indices[i]
+            self.client_test_indices[i] = client_test_indices[i]
             
-            self.client_test_indices[i] = client_indices[:num_test]
-            self.client_train_indices[i] = client_indices[num_test:]
-            
-            print(f"Client {i}: Train={len(self.client_train_indices[i])}, Test={len(self.client_test_indices[i])}")
+            if i < 5:  # 打印前5个客户端的详细信息
+                train_labels_i = train_labels[self.client_train_indices[i]]
+                unique, counts = np.unique(train_labels_i, return_counts=True)
+                class_dist = dict(zip(unique.tolist(), counts.tolist()))
+                print(f"  Client {i}: Train={len(self.client_train_indices[i])}, "
+                      f"Test={len(self.client_test_indices[i])}, "
+                      f"Classes={list(class_dist.keys())[:5]}...")
+        
+        if self.num_clients > 5:
+            print(f"  ... (remaining {self.num_clients - 5} clients)")
     
     def get_client_train_dataloader(self, client_id: int) -> DataLoader:
-        """
-        获取指定客户端的训练数据加载器 / Get training data loader for specified client
-        
-        Args:
-            client_id: 客户端ID / Client ID
-            
-        Returns:
-            客户端的训练数据加载器 / Client's training data loader
-        """
+        """获取客户端训练数据加载器 / Get client training dataloader"""
         if client_id not in self.client_train_indices:
             raise ValueError(f"Invalid client ID: {client_id}")
         
@@ -311,15 +300,7 @@ class FederatedDataLoader:
         )
     
     def get_client_test_dataloader(self, client_id: int) -> DataLoader:
-        """
-        获取指定客户端的测试数据加载器 / Get test data loader for specified client
-        
-        Args:
-            client_id: 客户端ID / Client ID
-            
-        Returns:
-            客户端的测试数据加载器 / Client's test data loader
-        """
+        """获取客户端测试数据加载器 / Get client test dataloader"""
         if client_id not in self.client_test_indices:
             raise ValueError(f"Invalid client ID: {client_id}")
         
@@ -327,34 +308,37 @@ class FederatedDataLoader:
         sampler = SubsetRandomSampler(indices)
         
         return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size * 2,  # 测试时可以使用更大的批次
+            self.test_dataset,
+            batch_size=self.batch_size * 2,  # 测试时可用更大批次
             sampler=sampler,
             num_workers=0,
             pin_memory=True,
             shuffle=False
         )
     
+    def get_num_train_samples(self, client_id: int) -> int:
+        """获取客户端训练样本数 / Get number of training samples"""
+        return len(self.client_train_indices.get(client_id, []))
+    
+    def get_num_test_samples(self, client_id: int) -> int:
+        """获取客户端测试样本数 / Get number of test samples"""
+        return len(self.client_test_indices.get(client_id, []))
+    
     def get_client_data_info(self, client_id: int) -> Dict:
-        """
-        获取客户端数据信息 / Get client data information
-        
-        Args:
-            client_id: 客户端ID / Client ID
-            
-        Returns:
-            包含数据量、类别分布等信息的字典 / Dictionary containing data size, class distribution, etc.
-        """
+        """获取客户端数据信息 / Get client data information"""
         train_indices = self.client_train_indices[client_id]
         test_indices = self.client_test_indices[client_id]
         
-        # 获取训练集标签分布 / Get training set label distribution
+        # 获取标签分布 / Get label distribution
         if hasattr(self.train_dataset, 'targets'):
             train_labels = np.array(self.train_dataset.targets)[train_indices]
-            test_labels = np.array(self.train_dataset.targets)[test_indices]
         else:
             train_labels = np.array([self.train_dataset[i][1] for i in train_indices])
-            test_labels = np.array([self.train_dataset[i][1] for i in test_indices])
+        
+        if hasattr(self.test_dataset, 'targets'):
+            test_labels = np.array(self.test_dataset.targets)[test_indices]
+        else:
+            test_labels = np.array([self.test_dataset[i][1] for i in test_indices])
         
         train_unique, train_counts = np.unique(train_labels, return_counts=True)
         test_unique, test_counts = np.unique(test_labels, return_counts=True)
@@ -368,17 +352,14 @@ class FederatedDataLoader:
             'test_indices': test_indices
         }
     
-    def visualize_data_distribution(self) -> None:
-        """
-        可视化数据分布 / Visualize data distribution
-        用于检查IID和Non-IID设置的效果 / Used to check the effect of IID and Non-IID settings
-        """
+    def visualize_data_distribution(self, save_path: str = None) -> None:
+        """可视化数据分布 / Visualize data distribution"""
         import matplotlib.pyplot as plt
         
         fig, axes = plt.subplots(2, 5, figsize=(20, 8))
         axes = axes.flatten()
         
-        # 可视化前10个客户端的数据分布 / Visualize data distribution of first 10 clients
+        # 可视化前10个客户端 / Visualize first 10 clients
         for i in range(min(10, self.num_clients)):
             info = self.get_client_data_info(i)
             label_dist = info['train_label_distribution']
@@ -388,7 +369,13 @@ class FederatedDataLoader:
             axes[i].set_xlabel('Class')
             axes[i].set_ylabel('Count')
         
-        plt.suptitle(f'{self.dataset_name} - {self.distribution.upper()} Distribution (Train Set)')
+        plt.suptitle(f'{self.dataset_name} - {self.distribution.upper()} Distribution')
         plt.tight_layout()
-        plt.savefig(f'data_distribution_{self.dataset_name}_{self.distribution}.png')
-        plt.show()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"Distribution visualization saved to: {save_path}")
+        else:
+            plt.savefig(f'data_distribution_{self.dataset_name}_{self.distribution}.png')
+        
+        plt.close()
