@@ -33,11 +33,11 @@ class FederatedConfig:
     """联邦学习配置 / Federated Learning Configuration"""
     
     # 基本参数 / Basic parameters
-    NUM_CLIENTS = 100  # 客户端总数 / Total number of clients
-    NUM_ROUNDS = 100  # 训练轮次 / Training rounds
+    NUM_CLIENTS = 10  # 客户端总数 / Total number of clients
+    NUM_ROUNDS = 30  # 训练轮次 / Training rounds
     
     # 本地训练参数 / Local training parameters
-    LOCAL_EPOCHS = 5  # 本地训练轮次 / Local training epochs
+    LOCAL_EPOCHS = 30  # 本地训练轮次 / Local training epochs
     LOCAL_BATCH_SIZE = 32  # 本地批次大小 / Local batch size
     LEARNING_RATE = 0.01  # 学习率 / Learning rate
     

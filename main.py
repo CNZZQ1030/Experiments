@@ -60,6 +60,10 @@ def parse_arguments():
                        choices=['rounds', 'days', 'phases', 'dynamic', 'completion'],
                        help='Time slice type / 时间片类型')
     
+    parser.add_argument('--rounds_per_slice', type=int, default=10,
+                       help='Number of rounds per time slice (only for rounds-based slicing) / '
+                            '每个时间片包含的轮次数（仅对rounds模式有效）')
+    
     # 实验设置 / Experiment settings
     parser.add_argument('--experiment_name', type=str, default=None,
                        help='Name of the experiment / 实验名称')
@@ -119,6 +123,7 @@ def main():
                 'num_rounds': args.num_rounds,
                 'distribution': 'iid',
                 'time_slice_type': args.time_slice,
+                'rounds_per_slice': args.rounds_per_slice,
                 'device': device
             },
             {
@@ -128,6 +133,7 @@ def main():
                 'num_rounds': args.num_rounds,
                 'distribution': 'non-iid',
                 'time_slice_type': args.time_slice,
+                'rounds_per_slice': args.rounds_per_slice,
                 'device': device
             }
         ]
@@ -151,6 +157,7 @@ def main():
                 'num_rounds': args.num_rounds,
                 'distribution': args.distribution,
                 'time_slice_type': ts_type,
+                'rounds_per_slice': args.rounds_per_slice,
                 'device': device
             })
         
@@ -173,6 +180,7 @@ def main():
                 'num_rounds': args.num_rounds,
                 'distribution': args.distribution,
                 'time_slice_type': args.time_slice,
+                'rounds_per_slice': args.rounds_per_slice,
                 'device': device
             })
         
@@ -189,6 +197,7 @@ def main():
         print(f"  Rounds / 轮次: {args.num_rounds}")
         print(f"  Distribution / 分布: {args.distribution}")
         print(f"  Time Slice / 时间片: {args.time_slice}")
+        print(f"  Rounds per Slice / 每时间片轮次: {args.rounds_per_slice}")
         
         # 创建实验运行器 / Create experiment runner
         runner = ExperimentRunner(
@@ -197,6 +206,7 @@ def main():
             num_rounds=args.num_rounds,
             distribution=args.distribution,
             time_slice_type=args.time_slice,
+            rounds_per_slice=args.rounds_per_slice,
             device=device
         )
         

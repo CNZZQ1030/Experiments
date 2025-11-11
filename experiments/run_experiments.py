@@ -38,7 +38,7 @@ class ExperimentRunner:
     
     def __init__(self, dataset_name: str, num_clients: int, num_rounds: int,
                  distribution: str = "iid", time_slice_type: str = "rounds",
-                 device: torch.device = None):
+                 rounds_per_slice: int = None, device: torch.device = None):
         """
         初始化实验运行器 / Initialize experiment runner
         
@@ -48,6 +48,7 @@ class ExperimentRunner:
             num_rounds: 训练轮次 / Training rounds
             distribution: 数据分布 (iid/non-iid) / Data distribution
             time_slice_type: 时间片类型 / Time slice type
+            rounds_per_slice: 每个时间片的轮次数 / Rounds per slice (可选)
             device: 计算设备 / Computing device
         """
         self.dataset_name = dataset_name
@@ -55,6 +56,7 @@ class ExperimentRunner:
         self.num_rounds = num_rounds
         self.distribution = distribution
         self.time_slice_type = time_slice_type
+        self.rounds_per_slice = rounds_per_slice or IncentiveConfig.ROUNDS_PER_SLICE
         self.device = device or DEVICE
         
         print(f"\n{'='*70}")
@@ -65,6 +67,7 @@ class ExperimentRunner:
         print(f"Rounds / 轮次: {num_rounds}")
         print(f"Distribution / 分布: {distribution}")
         print(f"Time Slice / 时间片: {time_slice_type}")
+        print(f"Rounds per Slice / 每时间片轮次: {self.rounds_per_slice}")
         print(f"Device / 设备: {self.device}")
         print(f"\nGoal / 目标: Compare standalone vs federated learning performance")
         print(f"目标: 比较独立训练与联邦学习的性能差异")
@@ -136,7 +139,7 @@ class ExperimentRunner:
         # 时间片管理器 / Time slice manager
         self.time_slice_manager = TimeSliceManager(
             slice_type=self.time_slice_type,
-            rounds_per_slice=IncentiveConfig.ROUNDS_PER_SLICE,
+            rounds_per_slice=self.rounds_per_slice,
             validity_slices=IncentiveConfig.POINTS_VALIDITY_SLICES
         )
         
@@ -166,6 +169,8 @@ class ExperimentRunner:
         """
         print(f"\n{'='*70}")
         print(f"Computing Standalone Baselines / 计算独立训练基准")
+        print(f"Each client trains independently for {epochs} epochs")
+        print(f"每个客户端独立训练 {epochs} 轮")
         print(f"{'='*70}")
         
         for client_id, client in tqdm(self.clients.items(), 
@@ -197,11 +202,17 @@ class ExperimentRunner:
         client_accuracies = {}
         
         # 客户端训练 / Client training
-        if round_num % 10 == 0 or round_num == 1:
-            print(f"\nRound {round_num}: Training {len(selected_clients)} clients...")
+        # 修改：始终显示进度条，但只在特定轮次显示详细信息
+        show_details = (round_num % max(1, self.num_rounds // 10) == 0) or round_num == 1 or round_num == self.num_rounds
         
-        for client_id in tqdm(selected_clients, desc=f"Round {round_num}", 
-                            disable=(round_num % 10 != 0 and round_num != 1)):
+        if show_details:
+            print(f"\n{'='*70}")
+            print(f"Round {round_num}/{self.num_rounds} - Training {len(selected_clients)} clients")
+            print(f"{'='*70}")
+        
+        for client_id in tqdm(selected_clients, 
+                            desc=f"Round {round_num}/{self.num_rounds}",
+                            leave=False):
             client = self.clients[client_id]
             
             # 获取个性化模型 / Get personalized model
@@ -253,6 +264,21 @@ class ExperimentRunner:
         # 计算轮次时间 / Calculate round time
         round_time = time.time() - round_start_time
         
+        # 打印详细进度 / Print detailed progress
+        if show_details:
+            if client_accuracies:
+                client_accs = list(client_accuracies.values())
+                print(f"Results:")
+                print(f"  Avg Accuracy: {np.mean(client_accs):.4f}")
+                print(f"  Max Accuracy: {np.max(client_accs):.4f}")
+                print(f"  Min Accuracy: {np.min(client_accs):.4f}")
+            
+            print(f"  Time: {round_time:.2f}s")
+            
+            if contributions:
+                contribs = list(contributions.values())
+                print(f"  Contribution - Mean: {np.mean(contribs):.4f}, Std: {np.std(contribs):.4f}")
+        
         # 记录指标 / Record metrics
         round_metrics = {
             'round': round_num,
@@ -286,27 +312,16 @@ class ExperimentRunner:
         # 联邦学习训练 / Federated learning training
         print(f"\n{'='*70}")
         print(f"Federated Learning Training / 联邦学习训练")
+        print(f"Total Rounds: {self.num_rounds}")
+        print(f"Local Epochs per Round: {FederatedConfig.LOCAL_EPOCHS}")
         print(f"{'='*70}")
         
         for round_num in range(1, self.num_rounds + 1):
             round_metrics = self.run_single_round(round_num)
-            
-            # 打印进度 / Print progress
-            if round_num % 10 == 0 or round_num == 1:
-                print(f"\nRound {round_num}/{self.num_rounds}")
-                
-                if 'client_accuracies' in round_metrics:
-                    client_accs = list(round_metrics['client_accuracies'].values())
-                    print(f"  Avg Accuracy: {np.mean(client_accs):.4f}")
-                    print(f"  Max Accuracy: {np.max(client_accs):.4f}")
-                    print(f"  Min Accuracy: {np.min(client_accs):.4f}")
-                
-                print(f"  Time: {round_metrics['time_consumption']:.2f}s")
-                
-                if 'contributions' in round_metrics and round_metrics['contributions']:
-                    contribs = list(round_metrics['contributions'].values())
-                    print(f"  Contribution - Mean: {np.mean(contribs):.4f}, "
-                          f"Std: {np.std(contribs):.4f}")
+        
+        print(f"\n{'='*70}")
+        print(f"Training Complete / 训练完成")
+        print(f"{'='*70}")
         
         # 计算最终指标 / Calculate final metrics
         final_metrics = self.metrics_calculator.calculate_final_metrics()
@@ -375,6 +390,9 @@ class ExperimentRunner:
             'num_rounds': self.num_rounds,
             'distribution': self.distribution,
             'time_slice_type': self.time_slice_type,
+            'rounds_per_slice': self.rounds_per_slice,
+            'local_epochs_per_round': FederatedConfig.LOCAL_EPOCHS,
+            'standalone_epochs': 10,
             'data_info': {
                 'original_train_samples': self.data_loader.num_train_samples,
                 'original_test_samples': self.data_loader.num_test_samples,
@@ -407,6 +425,7 @@ def compare_experiments(configurations: List[Dict]) -> Dict:
             num_rounds=config['num_rounds'],
             distribution=config['distribution'],
             time_slice_type=config['time_slice_type'],
+            rounds_per_slice=config.get('rounds_per_slice'),
             device=config.get('device', DEVICE)
         )
         
