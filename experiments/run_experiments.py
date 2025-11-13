@@ -158,7 +158,7 @@ class ExperimentRunner:
         self.metrics_calculator = MetricsCalculator()
         self.visualizer = Visualizer()
     
-    def calculate_standalone_baselines(self, epochs: int = 10):
+    def calculate_standalone_baselines(self, epochs: int = FederatedConfig.LOCAL_EPOCHS):
         """
         计算独立训练基准 / Calculate standalone baselines
         每个客户端在各自的测试集上评估
@@ -307,7 +307,7 @@ class ExperimentRunner:
         print(f"{'='*70}")
         
         # 计算独立训练基准 / Calculate standalone baselines
-        self.calculate_standalone_baselines(epochs=10)
+        self.calculate_standalone_baselines(epochs=FederatedConfig.LOCAL_EPOCHS)
         
         # 联邦学习训练 / Federated learning training
         print(f"\n{'='*70}")
