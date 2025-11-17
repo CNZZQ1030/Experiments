@@ -48,8 +48,18 @@ def parse_arguments():
                        help='Number of clients / 客户端数量')
     
     parser.add_argument('--num_rounds', type=int, default=100,
-                       help='Number of training rounds / 训练轮次')
+                       help='Number of FL training rounds (communication rounds) / '
+                            '联邦学习总轮次（通信轮数）')
     
+    # ← 新增参数
+    parser.add_argument('--standalone_epochs', type=int, default=None,
+                       help='Number of epochs for standalone training (default: use config value) / '
+                            '独立训练轮次（默认使用配置文件值）')
+    
+    parser.add_argument('--local_epochs', type=int, default=None,
+                       help='Number of local training epochs per FL round (default: use config value) / '
+                            '联邦学习每轮本地训练轮次（默认使用配置文件值）')
+        
     # 数据分布 / Data distribution
     parser.add_argument('--distribution', type=str, default='iid',
                        choices=['iid', 'non-iid'],
@@ -94,6 +104,13 @@ def main():
     
     # 设置随机种子 / Set random seed
     set_seed(args.seed)
+    
+    # 如果命令行指定了训练轮数，覆盖配置文件
+    if args.standalone_epochs is not None:
+        FederatedConfig.STANDALONE_EPOCHS = args.standalone_epochs
+    
+    if args.local_epochs is not None:
+        FederatedConfig.LOCAL_EPOCHS = args.local_epochs
     
     # 设置设备 / Set device
     if args.device == 'auto':
@@ -194,7 +211,9 @@ def main():
         print(f"Configuration / 配置:")
         print(f"  Dataset / 数据集: {args.dataset}")
         print(f"  Clients / 客户端: {args.num_clients}")
-        print(f"  Rounds / 轮次: {args.num_rounds}")
+        print(f"  FL Rounds / 联邦学习总轮次: {args.num_rounds}")
+        print(f"  Standalone Epochs / 独立训练轮数: {FederatedConfig.STANDALONE_EPOCHS}")
+        print(f"  Local Epochs / 每轮本地训练轮数: {FederatedConfig.LOCAL_EPOCHS}")
         print(f"  Distribution / 分布: {args.distribution}")
         print(f"  Time Slice / 时间片: {args.time_slice}")
         print(f"  Rounds per Slice / 每时间片轮次: {args.rounds_per_slice}")

@@ -1,6 +1,7 @@
 """
-federated/server.py
-联邦学习服务器（支持差异化模型分发）/ Federated Learning Server (with Differentiated Model Distribution)
+federated/server.py (Refactored)
+联邦学习服务器 - 基于实时贡献度的差异化模型分发
+Federated Learning Server - Differentiated model distribution based on real-time contribution
 """
 
 import torch
@@ -140,11 +141,13 @@ class FederatedServer:
     def distribute_personalized_models(self, round_num: int) -> Dict[int, Dict[str, torch.Tensor]]:
         """
         分发个性化模型 / Distribute personalized models
+        基于当前贡献度和会员等级
+        Based on current contribution and membership level
         """
         # 计算所有客户端贡献度 / Calculate all client contributions
         contributions = self.calculate_all_contributions(round_num)
         
-        # 确保贡献度被保存
+        # 保存贡献度 / Save contributions
         self.client_contributions = contributions
     
         # 准备所有更新列表 / Prepare all updates list

@@ -1,8 +1,7 @@
 """
-experiments/run_experiments.py
-实验运行器 / Experiment Runner
-专注于客户端个性化模型性能评估
-Focus on client personalized model performance evaluation
+experiments/run_experiments.py (Refactored)
+实验运行器 - 实时积分累加策略
+Experiment Runner - Real-time point accumulation strategy
 """
 
 import torch
@@ -32,8 +31,8 @@ from config import FederatedConfig, IncentiveConfig, DatasetConfig, DEVICE
 class ExperimentRunner:
     """
     实验运行器 / Experiment Runner
-    评估联邦学习激励机制对客户端性能的影响
-    Evaluate impact of federated learning incentive mechanism on client performance
+    实现实时积分累加策略
+    Implements real-time point accumulation strategy
     """
     
     def __init__(self, dataset_name: str, num_clients: int, num_rounds: int,
@@ -48,7 +47,7 @@ class ExperimentRunner:
             num_rounds: 训练轮次 / Training rounds
             distribution: 数据分布 (iid/non-iid) / Data distribution
             time_slice_type: 时间片类型 / Time slice type
-            rounds_per_slice: 每个时间片的轮次数 / Rounds per slice (可选)
+            rounds_per_slice: 每个时间片的轮次数 / Rounds per slice
             device: 计算设备 / Computing device
         """
         self.dataset_name = dataset_name
@@ -69,8 +68,7 @@ class ExperimentRunner:
         print(f"Time Slice / 时间片: {time_slice_type}")
         print(f"Rounds per Slice / 每时间片轮次: {self.rounds_per_slice}")
         print(f"Device / 设备: {self.device}")
-        print(f"\nGoal / 目标: Compare standalone vs federated learning performance")
-        print(f"目标: 比较独立训练与联邦学习的性能差异")
+        print(f"\nStrategy / 策略: Real-time point accumulation + Periodic expiration")
         
         # 初始化组件 / Initialize components
         self._initialize_data()
@@ -152,21 +150,32 @@ class ExperimentRunner:
         # 初始化客户端会员信息 / Initialize client membership
         for client_id in range(self.num_clients):
             self.membership_system.initialize_client(client_id)
+        
+        print(f"\n✓ Incentive system initialized")
+        print(f"  Strategy: Real-time point accumulation + Periodic expiration")
+        print(f"  Time slice type: {self.time_slice_type}")
+        print(f"  Rounds per slice: {self.rounds_per_slice}")
+        print(f"  Validity: {IncentiveConfig.POINTS_VALIDITY_SLICES} slices")
     
     def _initialize_metrics(self):
         """初始化指标 / Initialize metrics"""
         self.metrics_calculator = MetricsCalculator()
         self.visualizer = Visualizer()
     
-    def calculate_standalone_baselines(self, epochs: int = FederatedConfig.LOCAL_EPOCHS):
+    def calculate_standalone_baselines(self, epochs: int = None):
         """
         计算独立训练基准 / Calculate standalone baselines
         每个客户端在各自的测试集上评估
         Each client evaluated on their own test set
-        
+    
         Args:
             epochs: 独立训练轮次 / Standalone training epochs
+                如果为None，使用配置文件中的STANDALONE_EPOCHS
         """
+        # 使用独立的STANDALONE_EPOCHS参数
+        if epochs is None:
+            epochs = FederatedConfig.STANDALONE_EPOCHS
+
         print(f"\n{'='*70}")
         print(f"Computing Standalone Baselines / 计算独立训练基准")
         print(f"Each client trains independently for {epochs} epochs")
@@ -183,6 +192,8 @@ class ExperimentRunner:
     def run_single_round(self, round_num: int) -> Dict:
         """
         运行单轮训练 / Run single round of training
+        实现实时积分累加策略
+        Implements real-time point accumulation strategy
         
         Args:
             round_num: 当前轮次 / Current round
@@ -201,15 +212,17 @@ class ExperimentRunner:
         # 存储客户端准确率 / Store client accuracies
         client_accuracies = {}
         
-        # 客户端训练 / Client training
-        # 修改：始终显示进度条，但只在特定轮次显示详细信息
+        # 显示详细信息的条件 / Show details condition
         show_details = (round_num % max(1, self.num_rounds // 10) == 0) or round_num == 1 or round_num == self.num_rounds
         
         if show_details:
             print(f"\n{'='*70}")
-            print(f"Round {round_num}/{self.num_rounds} - Training {len(selected_clients)} clients")
+            print(f"Round {round_num}/{self.num_rounds}")
             print(f"{'='*70}")
         
+        # =====================================================================
+        # 步骤1: 客户端训练 / Step 1: Client Training
+        # =====================================================================
         for client_id in tqdm(selected_clients, 
                             desc=f"Round {round_num}/{self.num_rounds}",
                             leave=False):
@@ -239,27 +252,49 @@ class ExperimentRunner:
             self.metrics_calculator.record_federated_accuracy(client_id, federated_acc)
             client_accuracies[client_id] = federated_acc
         
-        # 分发个性化模型 / Distribute personalized models
-        self.personalized_models = self.server.distribute_personalized_models(round_num)
-        
-        # 更新全局模型 / Update global model
-        self.server.update_global_model()
-        
-        # 更新激励系统 / Update incentive system
+        # =====================================================================
+        # 步骤2: 计算贡献度 / Step 2: Calculate Contributions
+        # =====================================================================
         contributions = self.server.client_contributions
+        
+        # =====================================================================
+        # 步骤3: 实时积分累加 / Step 3: Real-time Point Accumulation
+        # =====================================================================
+        # 关键：每轮立即将贡献度转换为积分并累加到当前时间片
+        # Key: Immediately convert contribution to points and add to current slice
         for client_id, contribution in contributions.items():
-            # 更新时间片积分 / Update time slice points
-            current_slice = self.time_slice_manager.get_current_slice(round_num)
-            self.time_slice_manager.update_client_slice_points(
-                client_id, round_num, contribution * 1000
+            # 实时累加积分到当前时间片 / Add points to current slice in real-time
+            active_points = self.time_slice_manager.add_contribution_points(
+                client_id, round_num, contribution
             )
             
-            # 获取有效积分 / Get active points
-            active_points = self.time_slice_manager.get_active_points(client_id, round_num)
-            
-            # 更新会员等级 / Update membership level
+            # 基于当前有效积分更新会员等级 / Update membership based on current active points
             new_level = self.membership_system.update_membership_level(client_id, active_points)
             self.clients[client_id].update_membership_level(new_level)
+        
+        # =====================================================================
+        # 步骤4: 阶段性清理过期积分 / Step 4: Periodic Expiration Cleanup
+        # =====================================================================
+        # 检查是否需要清理过期积分 / Check if need to clean expired points
+        current_slice = self.time_slice_manager.get_current_slice(round_num)
+        if round_num > 1:
+            prev_slice = self.time_slice_manager.get_current_slice(round_num - 1)
+            # 当时间片切换时，清理过期积分 / Clean expired points when slice changes
+            if current_slice != prev_slice:
+                cleaned = self.time_slice_manager.clean_expired_points(round_num)
+                if cleaned and show_details:
+                    print(f"Time slice changed: {prev_slice} → {current_slice}")
+                    print(f"Cleaned expired points from {len(cleaned)} clients")
+        
+        # =====================================================================
+        # 步骤5: 分发个性化模型 / Step 5: Distribute Personalized Models
+        # =====================================================================
+        self.personalized_models = self.server.distribute_personalized_models(round_num)
+        
+        # =====================================================================
+        # 步骤6: 更新全局模型 / Step 6: Update Global Model
+        # =====================================================================
+        self.server.update_global_model()
         
         # 计算轮次时间 / Calculate round time
         round_time = time.time() - round_start_time
@@ -278,6 +313,12 @@ class ExperimentRunner:
             if contributions:
                 contribs = list(contributions.values())
                 print(f"  Contribution - Mean: {np.mean(contribs):.4f}, Std: {np.std(contribs):.4f}")
+            
+            # 显示积分统计 / Show point statistics
+            all_active_points = self.time_slice_manager.get_all_client_active_points(round_num)
+            if all_active_points:
+                points_values = list(all_active_points.values())
+                print(f"  Active Points - Mean: {np.mean(points_values):.2f}, Max: {np.max(points_values):.2f}")
         
         # 记录指标 / Record metrics
         round_metrics = {
@@ -285,7 +326,8 @@ class ExperimentRunner:
             'time_consumption': round_time,
             'num_selected_clients': len(selected_clients),
             'contributions': self.server.client_contributions.copy(),
-            'client_accuracies': client_accuracies.copy()
+            'client_accuracies': client_accuracies.copy(),
+            'current_slice': current_slice
         }
         
         self.metrics_calculator.record_round(round_metrics)
@@ -306,8 +348,8 @@ class ExperimentRunner:
         print(f"Starting Experiment: {experiment_name}")
         print(f"{'='*70}")
         
-        # 计算独立训练基准 / Calculate standalone baselines
-        self.calculate_standalone_baselines(epochs=FederatedConfig.LOCAL_EPOCHS)
+        # 计算独立训练基准（使用STANDALONE_EPOCHS）
+        self.calculate_standalone_baselines()  # 不传参，使用默认的STANDALONE_EPOCHS
         
         # 联邦学习训练 / Federated learning training
         print(f"\n{'='*70}")
@@ -322,6 +364,9 @@ class ExperimentRunner:
         print(f"\n{'='*70}")
         print(f"Training Complete / 训练完成")
         print(f"{'='*70}")
+        
+        # 打印时间片统计 / Print time slice statistics
+        self.time_slice_manager.print_summary(self.num_rounds)
         
         # 计算最终指标 / Calculate final metrics
         final_metrics = self.metrics_calculator.calculate_final_metrics()
@@ -391,22 +436,22 @@ class ExperimentRunner:
             'distribution': self.distribution,
             'time_slice_type': self.time_slice_type,
             'rounds_per_slice': self.rounds_per_slice,
+            'standalone_epochs': FederatedConfig.STANDALONE_EPOCHS,  # ← 新增
             'local_epochs_per_round': FederatedConfig.LOCAL_EPOCHS,
-            'standalone_epochs': 10,
             'data_info': {
                 'original_train_samples': self.data_loader.num_train_samples,
                 'original_test_samples': self.data_loader.num_test_samples,
                 'total_train_allocated': sum(self.data_loader.get_num_train_samples(i) 
-                                            for i in range(self.num_clients)),
+                                        for i in range(self.num_clients)),
                 'total_test_allocated': sum(self.data_loader.get_num_test_samples(i) 
-                                           for i in range(self.num_clients))
-            },
-            'final_metrics': final_metrics
+                                       for i in range(self.num_clients))
+        },
+        'final_metrics': final_metrics
         }
         
         with open(config_path, 'w') as f:
             json.dump(config_data, f, indent=2, default=str)
-        
+
         print(f"✓ Results saved to: {results_dir}")
 
 
