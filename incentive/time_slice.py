@@ -23,9 +23,9 @@ class TimeSliceManager:
     
     def __init__(self, 
                  slice_type: str = "rounds", 
-                 rounds_per_slice: int = 10,
+                 rounds_per_slice: int = 5,
                  days_per_slice: int = 3,
-                 validity_slices: int = 10):
+                 validity_slices: int = 2):
         """
         初始化时间片管理器 / Initialize time slice manager
         

@@ -1,7 +1,8 @@
 """
-配置文件 / Configuration File (已修正差异化模型配置)
-包含所有实验参数和系统设置
-Contains all experimental parameters and system settings
+config.py (Updated for CGSV)
+配置文件 / Configuration File
+包含所有实验参数和系统设置，已更新为CGSV方法
+Contains all experimental parameters and system settings, updated for CGSV method
 """
 
 import torch
@@ -37,7 +38,7 @@ class FederatedConfig:
     NUM_ROUNDS = 6  # 联邦学习总轮次（通信轮数） / FL training rounds (communication rounds)
 
     # 本地训练参数 / Local training parameters
-    STANDALONE_EPOCHS = 10  # ← 新增：独立训练轮次 / Standalone training epochs
+    STANDALONE_EPOCHS = 10  # 独立训练轮次 / Standalone training epochs
     LOCAL_EPOCHS = 1  # 联邦学习每轮本地训练轮次 / Local training epochs per round
     LOCAL_BATCH_SIZE = 32  # 本地批次大小 / Local batch size
     LEARNING_RATE = 0.01  # 学习率 / Learning rate
@@ -52,7 +53,6 @@ class FederatedConfig:
     
     # 注意：在差异化模型分发机制下，所有客户端都参与训练
     # Note: Under differentiated model distribution, all clients participate
-    # 不需要 CLIENTS_PER_ROUND 参数 / No need for CLIENTS_PER_ROUND parameter
 
 # =====================================
 # 激励机制配置 / Incentive Mechanism Configuration
@@ -61,11 +61,37 @@ class FederatedConfig:
 class IncentiveConfig:
     """激励机制参数配置 / Incentive Mechanism Parameters"""
     
-    # AMAC 相关配置 / AMAC Related Configuration
-    AMAC_LAMBDA = 0.5  # AMAC平滑参数 / AMAC smoothing parameter
-    AMAC_WINDOW_SIZE = 10  # AMAC滑动窗口大小 / AMAC sliding window size
+    # ===== CGSV 相关配置 / CGSV Related Configuration =====
+    CGSV_EPSILON = 1e-10  # CGSV余弦相似度计算的epsilon值 / Epsilon for cosine similarity
     
-    # 会员等级阈值 / Membership level thresholds
+    # ===== 时间片配置 / Time Slice Configuration =====
+    # 时间片的核心作用：防止训练后期贡献度递减导致客户端参与度下降
+    # Core purpose: Prevent participation decline due to diminishing contribution in late training
+    
+    TIME_SLICE_TYPE = "rounds"  # 时间片类型 / Time slice type
+    # 可选值 / Options: "rounds", "days", "phases", "dynamic", "completion"
+    
+    ROUNDS_PER_SLICE = 5  # 每个时间片包含的轮次数 / Rounds per time slice
+    # 说明：定义一个时间片的长度（以轮次为单位）
+    # Description: Defines the length of a time slice (in rounds)
+    
+    POINTS_VALIDITY_SLICES = 2  # 积分有效期（时间片数） / Points validity period (number of slices)
+    # 说明：控制时间窗口大小的关键参数
+    # Description: KEY PARAMETER that controls the time window size
+    # 例如：POINTS_VALIDITY_SLICES=10, ROUNDS_PER_SLICE=10 
+    #      意味着积分有效期为 10×10=100 轮
+    # Example: POINTS_VALIDITY_SLICES=10, ROUNDS_PER_SLICE=10
+    #         means points are valid for 10×10=100 rounds
+    
+    DAYS_PER_SLICE = 3  # 基于天数的时间片长度 / Days per time slice (for "days" mode)
+    
+    # 动态时间片参数 / Dynamic time slice parameters (for "dynamic" mode)
+    ACTIVITY_THRESHOLD = 0.5  # 活跃度阈值 / Activity threshold
+    BASE_SLICE_LENGTH = 10  # 基础时间片长度 / Base slice length
+    
+    # ===== 会员等级阈值 / Membership Level Thresholds =====
+    # 注意：这些是绝对积分阈值，第3个需求中将改为相对排名
+    # Note: These are absolute point thresholds, will be changed to relative ranking in requirement 3
     LEVEL_THRESHOLDS = {
         'bronze': 0,      # 铜级 / Bronze level
         'silver': 2000,   # 银级 / Silver level
@@ -81,26 +107,14 @@ class IncentiveConfig:
         'diamond': 2.0
     }
     
-    # 时间片配置 / Time slice configuration
-    TIME_SLICE_TYPE = "rounds"  # "rounds", "days", "phases", "dynamic", "completion"
-    ROUNDS_PER_SLICE = 10  # 基于轮次的时间片长度 / Rounds per time slice
-    DAYS_PER_SLICE = 3  # 基于天数的时间片长度 / Days per time slice
-    
-    # 积分有效期（时间片数） / Points validity period (number of time slices)
-    POINTS_VALIDITY_SLICES = 10
-    
-    # 动态时间片参数 / Dynamic time slice parameters
-    ACTIVITY_THRESHOLD = 0.5  # 活跃度阈值 / Activity threshold
-    BASE_SLICE_LENGTH = 10  # 基础时间片长度 / Base slice length
-    
     # ===== 差异化模型奖励配置 / Differentiated Model Rewards Configuration =====
     
     # 启用差异化模型奖励 / Enable differentiated model rewards
     ENABLE_TIERED_REWARDS = True
     
     # 等级基础访问比例 / Level base access ratios
-    # 与AMAC贡献度结合决定最终访问权限
-    # Combined with AMAC contribution to determine final access
+    # 与CGSV贡献度结合决定最终访问权限
+    # Combined with CGSV contribution to determine final access
     LEVEL_ACCESS_RATIOS = {
         'diamond': 1.0,
         'gold': 0.8,
@@ -111,7 +125,7 @@ class IncentiveConfig:
     # 最小保障访问数量 / Minimum guaranteed access
     MIN_ACCESSIBLE_UPDATES = 1
     
-    # 贡献-回报相关性计算参数
+    # 贡献-回报相关性计算参数 / Contribution-Reward Correlation parameters
     CRC_WINDOW_SIZE = 10
     CRC_MIN_SAMPLES = 3
     CRC_START_ROUND = 1
@@ -208,7 +222,7 @@ class ExperimentConfig:
     NUM_RUNS = 3
     
     # 可视化配置 / Visualization configuration
-    PLOT_METRICS = ["accuracy", "loss", "participation_rate", "system_activity", "crc"]
+    PLOT_METRICS = ["accuracy", "loss", "participation_rate", "system_activity", "crc", "ipr"]
     PLOT_FORMATS = ["png", "pdf"]  # 图片保存格式 / Image save formats
     
     # 输出路径配置

@@ -1,7 +1,12 @@
 """
-experiments/run_experiments.py (Refactored)
-实验运行器 - 实时积分累加策略
-Experiment Runner - Real-time point accumulation strategy
+experiments/run_experiments.py (Updated for CGSV and Relative Ranking)
+实验运行器 - CGSV贡献度 + 相对排名会员系统
+Experiment Runner - CGSV contribution + Relative ranking membership system
+
+核心改进 / Core Improvements:
+1. CGSV代替AMAC / CGSV instead of AMAC
+2. 相对排名会员系统 / Relative ranking membership system
+3. 改进的贡献度-等级-模型映射 / Improved contribution-level-model mapping
 """
 
 import torch
@@ -31,13 +36,17 @@ from config import FederatedConfig, IncentiveConfig, DatasetConfig, DEVICE
 class ExperimentRunner:
     """
     实验运行器 / Experiment Runner
-    实现实时积分累加策略
-    Implements real-time point accumulation strategy
+    
+    核心改进 / Core Improvements:
+    1. 使用CGSV计算贡献度 / Use CGSV for contribution calculation
+    2. 基于相对排名的会员系统 / Membership system based on relative ranking
+    3. 每轮动态更新所有客户端等级 / Update all client levels dynamically each round
     """
     
     def __init__(self, dataset_name: str, num_clients: int, num_rounds: int,
                  distribution: str = "iid", time_slice_type: str = "rounds",
-                 rounds_per_slice: int = None, device: torch.device = None):
+                 rounds_per_slice: int = None, device: torch.device = None,
+                 use_relative_normalization: bool = True):
         """
         初始化实验运行器 / Initialize experiment runner
         
@@ -49,6 +58,7 @@ class ExperimentRunner:
             time_slice_type: 时间片类型 / Time slice type
             rounds_per_slice: 每个时间片的轮次数 / Rounds per slice
             device: 计算设备 / Computing device
+            use_relative_normalization: 是否使用相对归一化 / Use relative normalization
         """
         self.dataset_name = dataset_name
         self.num_clients = num_clients
@@ -57,6 +67,7 @@ class ExperimentRunner:
         self.time_slice_type = time_slice_type
         self.rounds_per_slice = rounds_per_slice or IncentiveConfig.ROUNDS_PER_SLICE
         self.device = device or DEVICE
+        self.use_relative_normalization = use_relative_normalization
         
         print(f"\n{'='*70}")
         print(f"Experiment Initialization / 实验初始化")
@@ -68,7 +79,10 @@ class ExperimentRunner:
         print(f"Time Slice / 时间片: {time_slice_type}")
         print(f"Rounds per Slice / 每时间片轮次: {self.rounds_per_slice}")
         print(f"Device / 设备: {self.device}")
-        print(f"\nStrategy / 策略: Real-time point accumulation + Periodic expiration")
+        print(f"\nImproved Strategy / 改进策略:")
+        print(f"  1. CGSV Contribution Calculation / CGSV贡献度计算")
+        print(f"  2. Relative Ranking Membership / 相对排名会员制")
+        print(f"  3. Contribution Normalization / 贡献度归一化: {use_relative_normalization}")
         
         # 初始化组件 / Initialize components
         self._initialize_data()
@@ -101,7 +115,11 @@ class ExperimentRunner:
     
     def _initialize_server(self):
         """初始化服务器 / Initialize server"""
-        self.server = FederatedServer(self.model, self.device)
+        self.server = FederatedServer(
+            self.model, 
+            self.device,
+            use_relative_normalization=self.use_relative_normalization
+        )
     
     def _initialize_clients(self):
         """初始化客户端 / Initialize clients"""
@@ -109,15 +127,12 @@ class ExperimentRunner:
         
         print("\nInitializing clients / 初始化客户端...")
         for client_id in tqdm(range(self.num_clients), desc="Creating clients"):
-            # 获取客户端数据 / Get client data
             train_loader = self.data_loader.get_client_train_dataloader(client_id)
             test_loader = self.data_loader.get_client_test_dataloader(client_id)
             
-            # 获取样本数量 / Get sample counts
             num_train = self.data_loader.get_num_train_samples(client_id)
             num_test = self.data_loader.get_num_test_samples(client_id)
             
-            # 创建客户端 / Create client
             client = FederatedClient(
                 client_id=client_id,
                 model=self.model,
@@ -141,10 +156,11 @@ class ExperimentRunner:
             validity_slices=IncentiveConfig.POINTS_VALIDITY_SLICES
         )
         
-        # 会员系统 / Membership system
+        # 会员系统（相对排名版本）/ Membership system (relative ranking version)
         self.membership_system = MembershipSystem(
-            level_thresholds=IncentiveConfig.LEVEL_THRESHOLDS,
             level_multipliers=IncentiveConfig.LEVEL_MULTIPLIERS
+            # 注意：不再需要level_thresholds，使用相对排名
+            # Note: No longer need level_thresholds, use relative ranking
         )
         
         # 初始化客户端会员信息 / Initialize client membership
@@ -152,7 +168,7 @@ class ExperimentRunner:
             self.membership_system.initialize_client(client_id)
         
         print(f"\n✓ Incentive system initialized")
-        print(f"  Strategy: Real-time point accumulation + Periodic expiration")
+        print(f"  Strategy: CGSV + Relative Ranking + Periodic expiration")
         print(f"  Time slice type: {self.time_slice_type}")
         print(f"  Rounds per slice: {self.rounds_per_slice}")
         print(f"  Validity: {IncentiveConfig.POINTS_VALIDITY_SLICES} slices")
@@ -170,16 +186,13 @@ class ExperimentRunner:
     
         Args:
             epochs: 独立训练轮次 / Standalone training epochs
-                如果为None，使用配置文件中的STANDALONE_EPOCHS
         """
-        # 使用独立的STANDALONE_EPOCHS参数
         if epochs is None:
             epochs = FederatedConfig.STANDALONE_EPOCHS
 
         print(f"\n{'='*70}")
         print(f"Computing Standalone Baselines / 计算独立训练基准")
         print(f"Each client trains independently for {epochs} epochs")
-        print(f"每个客户端独立训练 {epochs} 轮")
         print(f"{'='*70}")
         
         for client_id, client in tqdm(self.clients.items(), 
@@ -188,12 +201,21 @@ class ExperimentRunner:
             self.metrics_calculator.record_standalone_accuracy(client_id, standalone_acc)
         
         print("✓ Standalone baselines computed")
-    
+
+"""
+experiments/run_experiments.py (Part 2: Training Logic)
+实验运行器 - 第2部分：核心训练逻辑
+Experiment Runner - Part 2: Core Training Logic
+"""
+
     def run_single_round(self, round_num: int) -> Dict:
         """
         运行单轮训练 / Run single round of training
-        实现实时积分累加策略
-        Implements real-time point accumulation strategy
+        
+        核心改进 / Core Improvements:
+        1. 使用CGSV计算贡献度 / Use CGSV for contribution
+        2. 基于相对排名更新会员等级 / Update membership by relative ranking
+        3. 改进的贡献度积分转换 / Improved contribution-to-points conversion
         
         Args:
             round_num: 当前轮次 / Current round
@@ -253,46 +275,57 @@ class ExperimentRunner:
             client_accuracies[client_id] = federated_acc
         
         # =====================================================================
-        # 步骤2: 计算贡献度 / Step 2: Calculate Contributions
+        # 步骤2: 计算贡献度（CGSV + 归一化）/ Step 2: Calculate Contributions
         # =====================================================================
-        contributions = self.server.client_contributions
+        normalized_contributions, raw_contributions = self.server.calculate_all_contributions(round_num)
         
         # =====================================================================
         # 步骤3: 实时积分累加 / Step 3: Real-time Point Accumulation
         # =====================================================================
-        # 关键：每轮立即将贡献度转换为积分并累加到当前时间片
-        # Key: Immediately convert contribution to points and add to current slice
-        for client_id, contribution in contributions.items():
-            # 实时累加积分到当前时间片 / Add points to current slice in real-time
+        # 将归一化贡献度转换为积分并累加到当前时间片
+        # Convert normalized contribution to points and add to current slice
+        all_active_points = {}
+        for client_id, contribution in normalized_contributions.items():
             active_points = self.time_slice_manager.add_contribution_points(
                 client_id, round_num, contribution
             )
-            
-            # 基于当前有效积分更新会员等级 / Update membership based on current active points
-            new_level = self.membership_system.update_membership_level(client_id, active_points)
+            all_active_points[client_id] = active_points
+        
+        # =====================================================================
+        # 步骤4: 基于相对排名更新所有客户端的会员等级 / Step 4: Update Membership by Ranking
+        # =====================================================================
+        # 这是核心改进！使用相对排名代替绝对阈值
+        # This is the core improvement! Use relative ranking instead of absolute thresholds
+        new_levels = self.membership_system.update_all_memberships_by_ranking(all_active_points)
+        
+        # 更新客户端的会员等级 / Update client membership levels
+        for client_id, new_level in new_levels.items():
             self.clients[client_id].update_membership_level(new_level)
         
         # =====================================================================
-        # 步骤4: 阶段性清理过期积分 / Step 4: Periodic Expiration Cleanup
+        # 步骤5: 阶段性清理过期积分 / Step 5: Periodic Expiration Cleanup
         # =====================================================================
-        # 检查是否需要清理过期积分 / Check if need to clean expired points
         current_slice = self.time_slice_manager.get_current_slice(round_num)
         if round_num > 1:
             prev_slice = self.time_slice_manager.get_current_slice(round_num - 1)
-            # 当时间片切换时，清理过期积分 / Clean expired points when slice changes
             if current_slice != prev_slice:
                 cleaned = self.time_slice_manager.clean_expired_points(round_num)
                 if cleaned and show_details:
                     print(f"Time slice changed: {prev_slice} → {current_slice}")
                     print(f"Cleaned expired points from {len(cleaned)} clients")
+                    # 时间片切换后重新计算等级
+                    updated_points = self.time_slice_manager.get_all_client_active_points(round_num)
+                    new_levels = self.membership_system.update_all_memberships_by_ranking(updated_points)
+                    for client_id, new_level in new_levels.items():
+                        self.clients[client_id].update_membership_level(new_level)
         
         # =====================================================================
-        # 步骤5: 分发个性化模型 / Step 5: Distribute Personalized Models
+        # 步骤6: 分发个性化模型 / Step 6: Distribute Personalized Models
         # =====================================================================
         self.personalized_models = self.server.distribute_personalized_models(round_num)
         
         # =====================================================================
-        # 步骤6: 更新全局模型 / Step 6: Update Global Model
+        # 步骤7: 更新全局模型 / Step 7: Update Global Model
         # =====================================================================
         self.server.update_global_model()
         
@@ -310,24 +343,34 @@ class ExperimentRunner:
             
             print(f"  Time: {round_time:.2f}s")
             
-            if contributions:
-                contribs = list(contributions.values())
-                print(f"  Contribution - Mean: {np.mean(contribs):.4f}, Std: {np.std(contribs):.4f}")
+            # 显示贡献度统计 / Show contribution statistics
+            if normalized_contributions:
+                norm_contribs = list(normalized_contributions.values())
+                raw_contribs = list(raw_contributions.values())
+                print(f"  Raw CGSV - Mean: {np.mean(raw_contribs):.4f}, Std: {np.std(raw_contribs):.4f}")
+                if self.use_relative_normalization:
+                    print(f"  Normalized - Mean: {np.mean(norm_contribs):.4f}, Std: {np.std(norm_contribs):.4f}")
             
-            # 显示积分统计 / Show point statistics
-            all_active_points = self.time_slice_manager.get_all_client_active_points(round_num)
+            # 显示积分和等级统计 / Show points and level statistics
             if all_active_points:
                 points_values = list(all_active_points.values())
                 print(f"  Active Points - Mean: {np.mean(points_values):.2f}, Max: {np.max(points_values):.2f}")
+            
+            # 打印会员等级分布 / Print membership distribution
+            if round_num % 10 == 0 or round_num == self.num_rounds:
+                self.membership_system.print_membership_distribution()
         
         # 记录指标 / Record metrics
         round_metrics = {
             'round': round_num,
             'time_consumption': round_time,
             'num_selected_clients': len(selected_clients),
-            'contributions': self.server.client_contributions.copy(),
+            'normalized_contributions': normalized_contributions.copy(),
+            'raw_contributions': raw_contributions.copy(),
             'client_accuracies': client_accuracies.copy(),
-            'current_slice': current_slice
+            'current_slice': current_slice,
+            'active_points': all_active_points.copy(),
+            'membership_levels': {cid: self.clients[cid].membership_level for cid in self.clients}
         }
         
         self.metrics_calculator.record_round(round_metrics)
@@ -348,8 +391,8 @@ class ExperimentRunner:
         print(f"Starting Experiment: {experiment_name}")
         print(f"{'='*70}")
         
-        # 计算独立训练基准（使用STANDALONE_EPOCHS）
-        self.calculate_standalone_baselines()  # 不传参，使用默认的STANDALONE_EPOCHS
+        # 计算独立训练基准
+        self.calculate_standalone_baselines()
         
         # 联邦学习训练 / Federated learning training
         print(f"\n{'='*70}")
@@ -368,6 +411,12 @@ class ExperimentRunner:
         # 打印时间片统计 / Print time slice statistics
         self.time_slice_manager.print_summary(self.num_rounds)
         
+        # 打印贡献度统计 / Print contribution statistics
+        self.server.print_contribution_summary()
+        
+        # 打印最终会员分布 / Print final membership distribution
+        self.membership_system.print_membership_distribution()
+        
         # 计算最终指标 / Calculate final metrics
         final_metrics = self.metrics_calculator.calculate_final_metrics()
         
@@ -382,6 +431,12 @@ class ExperimentRunner:
         
         return final_metrics
     
+"""
+experiments/run_experiments.py (Part 3: Visualization and Saving)
+实验运行器 - 第3部分：可视化和结果保存
+Experiment Runner - Part 3: Visualization and Saving
+"""
+
     def _generate_visualizations(self, experiment_name: str):
         """生成可视化 / Generate visualizations"""
         print("\nGenerating visualizations / 生成可视化...")
@@ -399,19 +454,27 @@ class ExperimentRunner:
             )
         
         # 训练曲线 / Training curves
+        # 准备贡献度历史（使用归一化后的）
         contributions_history = []
+        raw_contributions_history = []
         for round_metric in self.metrics_calculator.round_metrics:
-            if 'contributions' in round_metric and round_metric['contributions']:
-                contributions_history.append(round_metric['contributions'])
+            if 'normalized_contributions' in round_metric:
+                contributions_history.append(round_metric['normalized_contributions'])
             else:
                 contributions_history.append({})
+            
+            if 'raw_contributions' in round_metric:
+                raw_contributions_history.append(round_metric['raw_contributions'])
+            else:
+                raw_contributions_history.append({})
         
         metrics_history = {
             'rounds': list(range(1, len(self.metrics_calculator.avg_client_accuracies) + 1)),
             'avg_client_accuracy': self.metrics_calculator.avg_client_accuracies,
             'max_client_accuracy': self.metrics_calculator.max_client_accuracies,
             'time_per_round': self.metrics_calculator.time_consumptions,
-            'contributions': contributions_history
+            'contributions': contributions_history,  # 归一化贡献度
+            'raw_contributions': raw_contributions_history  # 原始CGSV
         }
         
         self.visualizer.plot_training_curves(metrics_history, experiment_name)
@@ -425,19 +488,23 @@ class ExperimentRunner:
         
         # 保存指标 / Save metrics
         metrics_path = os.path.join(results_dir, f"{experiment_name}_metrics.json")
-        self.metrics_calculator.save_metrics(metrics_path)
         
-        # 保存配置 / Save configuration
-        config_path = os.path.join(results_dir, f"{experiment_name}_config.json")
-        config_data = {
-            'dataset': self.dataset_name,
-            'num_clients': self.num_clients,
-            'num_rounds': self.num_rounds,
-            'distribution': self.distribution,
-            'time_slice_type': self.time_slice_type,
-            'rounds_per_slice': self.rounds_per_slice,
-            'standalone_epochs': FederatedConfig.STANDALONE_EPOCHS,  # ← 新增
-            'local_epochs_per_round': FederatedConfig.LOCAL_EPOCHS,
+        # 准备保存的数据
+        save_data = {
+            'final_metrics': final_metrics,
+            'configuration': {
+                'dataset': self.dataset_name,
+                'num_clients': self.num_clients,
+                'num_rounds': self.num_rounds,
+                'distribution': self.distribution,
+                'time_slice_type': self.time_slice_type,
+                'rounds_per_slice': self.rounds_per_slice,
+                'standalone_epochs': FederatedConfig.STANDALONE_EPOCHS,
+                'local_epochs_per_round': FederatedConfig.LOCAL_EPOCHS,
+                'use_relative_normalization': self.use_relative_normalization,
+                'contribution_method': 'CGSV',
+                'membership_method': 'Relative Ranking'
+            },
             'data_info': {
                 'original_train_samples': self.data_loader.num_train_samples,
                 'original_test_samples': self.data_loader.num_test_samples,
@@ -445,18 +512,29 @@ class ExperimentRunner:
                                         for i in range(self.num_clients)),
                 'total_test_allocated': sum(self.data_loader.get_num_test_samples(i) 
                                        for i in range(self.num_clients))
-        },
-        'final_metrics': final_metrics
+            },
+            'round_metrics': self.metrics_calculator.round_metrics,
+            'membership_statistics': self.membership_system.get_membership_statistics(),
+            'contribution_statistics': self.server.get_contribution_statistics()
         }
         
-        with open(config_path, 'w') as f:
-            json.dump(config_data, f, indent=2, default=str)
+        # 保存为JSON
+        with open(metrics_path, 'w') as f:
+            json.dump(save_data, f, indent=2, default=str)
 
-        print(f"✓ Results saved to: {results_dir}")
+        print(f"✓ Results saved to: {metrics_path}")
 
 
 def compare_experiments(configurations: List[Dict]) -> Dict:
-    """比较不同配置的实验 / Compare experiments"""
+    """
+    比较不同配置的实验 / Compare experiments
+    
+    Args:
+        configurations: 实验配置列表 / List of experiment configurations
+        
+    Returns:
+        比较结果 / Comparison results
+    """
     comparison_results = {}
     
     for config in configurations:
@@ -471,7 +549,8 @@ def compare_experiments(configurations: List[Dict]) -> Dict:
             distribution=config['distribution'],
             time_slice_type=config['time_slice_type'],
             rounds_per_slice=config.get('rounds_per_slice'),
-            device=config.get('device', DEVICE)
+            device=config.get('device', DEVICE),
+            use_relative_normalization=config.get('use_relative_normalization', True)
         )
         
         results = runner.run_experiment(config['name'])
@@ -488,5 +567,13 @@ def compare_experiments(configurations: List[Dict]) -> Dict:
         print(f"  Max Accuracy: {results['client_accuracy']['max_final']:.4f}")
         print(f"  Total Time: {results['time_consumption']['total']:.2f}s")
         print(f"  PCC: {results['pcc']:.4f}")
+        
+        # 打印会员等级分布
+        if 'membership_statistics' in results:
+            print(f"  Membership Distribution:")
+            level_dist = results['membership_statistics']['level_percentages']
+            for level in ['diamond', 'gold', 'silver', 'bronze']:
+                if level in level_dist:
+                    print(f"    {level.capitalize()}: {level_dist[level]:.1f}%")
     
     return comparison_results
