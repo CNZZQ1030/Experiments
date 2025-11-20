@@ -110,7 +110,7 @@ class FederatedClient:
         return self.standalone_accuracy, self.standalone_loss
     
     def train_federated(self, global_weights: Dict[str, torch.Tensor],
-                       epochs: int = 5, lr: float = 0.01) -> Tuple[Dict, Dict]:
+                       epochs: int = 1, lr: float = 0.01) -> Tuple[Dict, Dict]:
         """
         联邦学习训练 / Federated learning training
         在客户端自己的测试集上评估
