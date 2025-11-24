@@ -90,9 +90,8 @@ class CGSVContributionCalculator:
         
         cos_sim = self.calculate_cosine_similarity(gi_flat, gagg_flat)
         
-        # s_{i,t} = max(0, cos_sim)
         contribution = max(0.0, cos_sim)
-        
+
         return contribution
     
     def calculate_all_contributions(self, 

@@ -1,11 +1,11 @@
 """
-main.py (Updated for UPSM Implementation)
-主程序 - 实现PDF文档中的UPSM统一概率采样机制
-Main Program - Implements UPSM from PDF
+main_sparsification.py
+主程序 - 基于稀疏化的差异化模型分发
+Main Program - Sparsification-based Differentiated Model Distribution
 
-用法 / Usage:
-    python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5
-    python main.py --dataset mnist --distribution iid --num_rounds 100
+使用方法 / Usage:
+    python main_sparsification.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5
+    python main_sparsification.py --dataset mnist --distribution iid --num_rounds 100
 """
 
 import torch
@@ -15,14 +15,16 @@ import argparse
 import os
 import sys
 import time
+import json
 from tqdm import tqdm
 
+# 添加项目路径 / Add project path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import FederatedConfig, IncentiveConfig, DatasetConfig, DEVICE
 from datasets.data_loader import FederatedDataLoader
 from models.cnn_model import ModelFactory
-from federated.server import FederatedServer
+from federated.server import FederatedServerWithSparsification
 from federated.client import FederatedClient
 from incentive.time_slice import TimeSliceManager
 from incentive.membership import MembershipSystem
@@ -42,9 +44,14 @@ def set_seed(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 
-class FederatedLearningExperiment:
+class SparsificationFederatedLearning:
     """
-    联邦学习实验 - UPSM实现 / Federated Learning Experiment - UPSM Implementation
+    基于稀疏化的联邦学习实验 / Sparsification-based Federated Learning Experiment
+    
+    核心创新 / Core Innovation:
+    - 使用模型稀疏化替代选择性聚合 / Use model sparsification instead of selective aggregation
+    - 高贡献客户端获得更完整的模型 / High contributors get more complete models
+    - 低贡献客户端获得稀疏化的模型 / Low contributors get sparsified models
     """
     
     def __init__(self, args):
@@ -56,31 +63,44 @@ class FederatedLearningExperiment:
         self.experiment_name = self._generate_experiment_name()
         
         print(f"\n{'='*80}")
-        print(f"Federated Learning with UPSM")
+        print(f"Federated Learning with Sparsification-based Incentive Mechanism")
+        print(f"联邦学习 - 基于稀疏化的激励机制")
         print(f"{'='*80}")
         print(f"Experiment: {self.experiment_name}")
         print(f"Dataset: {args.dataset}")
         print(f"Distribution: {args.distribution}")
         print(f"Clients: {args.num_clients}")
         print(f"Rounds: {args.num_rounds}")
-        print(f"Time Slice: τ={args.rounds_per_slice}, W={IncentiveConfig.POINTS_VALIDITY_SLICES}")
         print(f"Device: {self.device}")
+        print(f"\nSparsification Configuration:")
+        print(f"  Mode: {args.sparsification_mode}")
+        print(f"  Lambda: {args.lambda_coef}")
+        print(f"  Min Keep Ratio: {args.min_keep_ratio}")
+        print(f"  Sparsity Ranges:")
+        for level, (min_s, max_s) in IncentiveConfig.LEVEL_SPARSITY_RANGES.items():
+            print(f"    {level}: [{min_s:.2f}, {max_s:.2f}]")
         print(f"{'='*80}")
         
-        self._initialize_components()
+        # 更新配置 / Update configuration
+        IncentiveConfig.SPARSIFICATION_MODE = args.sparsification_mode
+        IncentiveConfig.LAMBDA = args.lambda_coef
+        IncentiveConfig.MIN_KEEP_RATIO = args.min_keep_ratio
         
+        self._initialize_components()
+    
     def _generate_experiment_name(self) -> str:
         """生成实验名称 / Generate experiment name"""
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         dist_suffix = f"_a{self.args.alpha}" if self.args.distribution == "non-iid-dir" else ""
-        return f"UPSM_{self.args.dataset}_{self.args.distribution}{dist_suffix}_" \
-               f"c{self.args.num_clients}_r{self.args.num_rounds}_{timestamp}"
+        sparse_suffix = f"_{self.args.sparsification_mode}_l{self.args.lambda_coef}"
+        return f"Sparse_{self.args.dataset}_{self.args.distribution}{dist_suffix}" \
+               f"_c{self.args.num_clients}_r{self.args.num_rounds}{sparse_suffix}_{timestamp}"
     
     def _initialize_components(self):
         """初始化所有组件 / Initialize all components"""
         print("\nInitializing components...")
         
-        # 1. 数据 / Data
+        # 1. 数据加载 / Data loading
         print("  [1/6] Loading data...")
         self.data_loader = FederatedDataLoader(
             dataset_name=self.args.dataset,
@@ -90,31 +110,22 @@ class FederatedLearningExperiment:
             alpha=self.args.alpha
         )
         
-        # 2. 模型 / Model
+        # 2. 模型创建 / Model creation
         print("  [2/6] Creating model...")
         num_classes = DatasetConfig.NUM_CLASSES[self.args.dataset]
         input_channels = DatasetConfig.INPUT_SHAPE[self.args.dataset][0]
         
-        if self.args.dataset == "sst":
-            self.model = ModelFactory.create_model(
-                self.args.dataset,
-                num_classes=num_classes,
-                vocab_size=DatasetConfig.SST_VOCAB_SIZE,
-                embedding_dim=DatasetConfig.SST_EMBEDDING_DIM,
-                max_seq_length=DatasetConfig.SST_MAX_SEQ_LENGTH
-            )
-        else:
-            self.model = ModelFactory.create_model(
-                self.args.dataset,
-                num_classes=num_classes,
-                input_channels=input_channels
-            )
+        self.model = ModelFactory.create_model(
+            self.args.dataset,
+            num_classes=num_classes,
+            input_channels=input_channels
+        )
         
-        # 3. 服务器 / Server
-        print("  [3/6] Initializing server with UPSM...")
-        self.server = FederatedServer(self.model, self.device)
+        # 3. 服务器初始化 / Server initialization
+        print("  [3/6] Initializing server with sparsification...")
+        self.server = FederatedServerWithSparsification(self.model, self.device)
         
-        # 4. 客户端 / Clients
+        # 4. 客户端创建 / Client creation
         print("  [4/6] Creating clients...")
         self.clients = {}
         for client_id in tqdm(range(self.args.num_clients), desc="    Creating", leave=False):
@@ -143,14 +154,13 @@ class FederatedLearningExperiment:
         )
         
         self.membership_system = MembershipSystem(
-            level_multipliers=IncentiveConfig.LEVEL_MULTIPLIERS,
             ranking_percentiles=IncentiveConfig.LEVEL_PERCENTILES
         )
         
         for client_id in range(self.args.num_clients):
             self.membership_system.initialize_client(client_id)
         
-        # 6. 指标 / Metrics
+        # 6. 指标系统 / Metrics system
         print("  [6/6] Initializing metrics...")
         self.metrics_calculator = MetricsCalculator()
         self.visualizer = Visualizer(output_dir="outputs/figures")
@@ -170,7 +180,17 @@ class FederatedLearningExperiment:
         print("✓ Standalone baselines computed")
     
     def run_single_round(self, round_num: int) -> dict:
-        """运行单轮训练 / Run single round"""
+        """
+        运行单轮训练 / Run single round of training
+        
+        工作流程 / Workflow:
+        1. 客户端本地训练 / Client local training
+        2. 计算贡献度 / Calculate contributions
+        3. 更新全局模型 / Update global model
+        4. 累计积分和更新会员等级 / Accumulate points and update membership
+        5. 基于贡献度稀疏化全局模型 / Sparsify global model based on contributions
+        6. 分发稀疏化模型 / Distribute sparsified models
+        """
         round_start = time.time()
         
         selected_clients = list(range(self.args.num_clients))
@@ -185,36 +205,45 @@ class FederatedLearningExperiment:
             print(f"Round {round_num}/{self.args.num_rounds}")
             print(f"{'='*80}")
         
-        # 客户端训练 / Client training
+        # ========== 步骤1: 客户端本地训练 / Step 1: Client Local Training ==========
         for client_id in tqdm(selected_clients, 
                             desc=f"Round {round_num}/{self.args.num_rounds}",
                             leave=False):
             client = self.clients[client_id]
             
+            # 获取模型权重 / Get model weights
             if round_num == 1:
+                # 第一轮使用全局模型 / Use global model in first round
                 model_weights = self.server.get_global_model_weights()
             else:
-                if hasattr(self, 'personalized_models') and client_id in self.personalized_models:
-                    model_weights = self.personalized_models[client_id]
+                # 后续轮次使用稀疏化后的个性化模型 / Use sparsified personalized model
+                if hasattr(self, 'sparsified_models') and client_id in self.sparsified_models:
+                    model_weights = self.sparsified_models[client_id]
                 else:
                     model_weights = self.server.get_global_model_weights()
             
+            # 本地训练 / Local training
             updated_weights, train_info = client.train_federated(
                 global_weights=model_weights,
                 epochs=self.args.local_epochs,
                 lr=self.args.learning_rate
             )
             
+            # 收集更新 / Collect updates
             self.server.collect_client_updates(client_id, updated_weights, train_info)
             
+            # 记录准确率 / Record accuracy
             federated_acc = train_info['federated_accuracy']
             self.metrics_calculator.record_federated_accuracy(client_id, federated_acc)
             client_accuracies[client_id] = federated_acc
         
-        # 计算贡献度 / Calculate contributions
+        # ========== 步骤2: 计算贡献度 / Step 2: Calculate Contributions ==========
         contributions = self.server.calculate_all_contributions(round_num)
         
-        # 累计积分 / Accumulate points
+        # ========== 步骤3: 更新全局模型 / Step 3: Update Global Model ==========
+        self.server.update_global_model()
+        
+        # ========== 步骤4: 时间片积分和会员等级 / Step 4: Time-slice Points and Membership ==========
         all_active_points = {}
         for client_id, contribution in contributions.items():
             active_points = self.time_slice_manager.add_contribution_points(
@@ -222,7 +251,7 @@ class FederatedLearningExperiment:
             )
             all_active_points[client_id] = active_points
         
-        # 更新会员等级 / Update membership
+        # 基于相对排名更新会员等级 / Update membership based on relative ranking
         new_levels = self.membership_system.update_all_memberships_by_ranking(all_active_points)
         for client_id, new_level in new_levels.items():
             self.clients[client_id].update_membership_level(new_level)
@@ -233,29 +262,47 @@ class FederatedLearningExperiment:
             prev_slice = self.time_slice_manager.get_current_slice(round_num - 1)
             if current_slice != prev_slice:
                 cleaned = self.time_slice_manager.clean_expired_points(round_num)
-                if cleaned:
-                    updated_points = self.time_slice_manager.get_all_client_active_points(round_num)
-                    new_levels = self.membership_system.update_all_memberships_by_ranking(updated_points)
-                    for client_id, new_level in new_levels.items():
-                        self.clients[client_id].update_membership_level(new_level)
+                if cleaned and show_details:
+                    print(f"  Time slice changed: {prev_slice} → {current_slice}")
+                    print(f"  Cleaned expired points from {len(cleaned)} clients")
+                
+                # 重新计算等级 / Recalculate levels
+                updated_points = self.time_slice_manager.get_all_client_active_points(round_num)
+                new_levels = self.membership_system.update_all_memberships_by_ranking(updated_points)
+                for client_id, new_level in new_levels.items():
+                    self.clients[client_id].update_membership_level(new_level)
         
-        # UPSM分发 / UPSM distribution
-        self.personalized_models = self.server.distribute_personalized_models(new_levels)
-        
-        # 更新全局模型 / Update global model
-        self.server.update_global_model()
+        # ========== 步骤5: 稀疏化模型分发 / Step 5: Sparsified Model Distribution ==========
+        self.sparsified_models = self.server.distribute_sparsified_models(new_levels)
         
         round_time = time.time() - round_start
         
-        # 打印详情 / Print details
+        # 打印轮次摘要 / Print round summary
         if show_details:
+            round_summary = self.server.get_round_summary(round_num)
+            
             if client_accuracies:
                 accs = list(client_accuracies.values())
-                print(f"Results:")
+                print(f"\nPerformance:")
                 print(f"  Avg Accuracy: {np.mean(accs):.4f}")
                 print(f"  Max Accuracy: {np.max(accs):.4f}")
                 print(f"  Min Accuracy: {np.min(accs):.4f}")
-            print(f"  Time: {round_time:.2f}s")
+            
+            print(f"\nContributions (CGSV):")
+            contrib_stats = round_summary['contribution_stats']
+            print(f"  Mean: {contrib_stats['mean']:.4f}, Std: {contrib_stats['std']:.4f}")
+            print(f"  Range: [{contrib_stats['min']:.4f}, {contrib_stats['max']:.4f}]")
+            
+            if 'sparsification_stats' in round_summary and round_summary['sparsification_stats']:
+                sparse_stats = round_summary['sparsification_stats']['by_level']
+                print(f"\nSparsification Statistics:")
+                for level in ['diamond', 'gold', 'silver', 'bronze']:
+                    if level in sparse_stats:
+                        ls = sparse_stats[level]
+                        print(f"  {level.capitalize()}: Keep={ls['avg_keep_ratio']:.3f}, "
+                              f"Sparse={ls['avg_sparsity_rate']:.3f} (n={ls['count']})")
+            
+            print(f"\nTime: {round_time:.2f}s")
             
             if round_num % 10 == 0 or round_num == self.args.num_rounds:
                 self.membership_system.print_membership_distribution()
@@ -269,7 +316,8 @@ class FederatedLearningExperiment:
             'client_accuracies': client_accuracies.copy(),
             'current_slice': current_slice,
             'active_points': all_active_points.copy(),
-            'membership_levels': new_levels.copy()
+            'membership_levels': new_levels.copy(),
+            'sparsification_stats': self.server.sparsification_distributor.get_sparsification_statistics()
         }
         
         self.metrics_calculator.record_round(round_metrics)
@@ -278,15 +326,15 @@ class FederatedLearningExperiment:
     def run_experiment(self):
         """运行完整实验 / Run complete experiment"""
         print(f"\n{'='*80}")
-        print(f"Starting: {self.experiment_name}")
+        print(f"Starting Experiment: {self.experiment_name}")
         print(f"{'='*80}")
         
         # 独立训练基准 / Standalone baselines
         self.compute_standalone_baselines()
         
-        # 联邦训练 / Federated training
+        # 联邦学习训练 / Federated learning training
         print(f"\n{'='*80}")
-        print("Federated Learning Training")
+        print("Federated Learning Training with Sparsification")
         print(f"{'='*80}")
         
         for round_num in range(1, self.args.num_rounds + 1):
@@ -305,7 +353,7 @@ class FederatedLearningExperiment:
         self.server.print_contribution_summary()
         self.membership_system.print_membership_distribution()
         
-        # 可视化 / Visualizations
+        # 生成可视化 / Generate visualizations
         self._generate_visualizations(final_metrics)
         
         # 保存结果 / Save results
@@ -335,8 +383,6 @@ class FederatedLearningExperiment:
     
     def _save_results(self, final_metrics):
         """保存结果 / Save results"""
-        import json
-        
         results_dir = "outputs/results"
         os.makedirs(results_dir, exist_ok=True)
         
@@ -344,6 +390,7 @@ class FederatedLearningExperiment:
         
         save_data = {
             'experiment_name': self.experiment_name,
+            'methodology': 'Sparsification-based Differentiated Model Distribution',
             'configuration': {
                 'dataset': self.args.dataset,
                 'num_clients': self.args.num_clients,
@@ -357,15 +404,18 @@ class FederatedLearningExperiment:
                 'standalone_epochs': self.args.standalone_epochs,
                 'seed': self.args.seed
             },
-            'upsm_config': {
-                'access_ratios': IncentiveConfig.LEVEL_ACCESS_RATIOS,
-                'selection_bias': IncentiveConfig.LEVEL_SELECTION_BIAS,
+            'sparsification_config': {
+                'mode': self.args.sparsification_mode,
+                'lambda': self.args.lambda_coef,
+                'min_keep_ratio': self.args.min_keep_ratio,
+                'sparsity_ranges': IncentiveConfig.LEVEL_SPARSITY_RANGES,
                 'level_percentiles': IncentiveConfig.LEVEL_PERCENTILES
             },
             'final_metrics': final_metrics,
-            'round_metrics': self.metrics_calculator.round_metrics,
+            'round_metrics': self.metrics_calculator.round_metrics[-10:],  # Save last 10 rounds
             'membership_statistics': self.membership_system.get_membership_statistics(),
-            'contribution_statistics': self.server.get_contribution_statistics()
+            'contribution_statistics': self.server.get_contribution_statistics(),
+            'sparsification_statistics': self.server.sparsification_distributor.get_sparsification_statistics()
         }
         
         with open(results_path, 'w') as f:
@@ -377,61 +427,75 @@ class FederatedLearningExperiment:
 def parse_args():
     """解析命令行参数 / Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description='Federated Learning with UPSM (Unified Probabilistic Sampling Mechanism)',
+        description='Federated Learning with Sparsification-based Incentive Mechanism\n'
+                    '联邦学习 - 基于稀疏化的激励机制',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples / 使用示例:
-  # IID distribution
-  python main.py --dataset mnist --distribution iid
+  # Basic experiment with magnitude-based sparsification
+  python main_sparsification.py --dataset mnist --distribution iid
   
-  # Non-IID with Dirichlet
-  python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5
+  # Non-IID with Dirichlet and specific sparsification settings
+  python main_sparsification.py --dataset cifar10 --distribution non-iid-dir \\
+                                --alpha 0.5 --lambda_coef 2.0 --sparsification_mode magnitude
   
-  # Larger experiment
-  python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.1 \\
-                 --num_clients 100 --num_rounds 100
+  # Large-scale experiment
+  python main_sparsification.py --dataset cifar10 --distribution non-iid-dir \\
+                                --alpha 0.1 --num_clients 100 --num_rounds 100 \\
+                                --sparsification_mode structured --lambda_coef 3.0
         """
     )
     
-    # 数据集 / Dataset
-    parser.add_argument('--dataset', type=str, default='mnist',
-                       choices=['mnist', 'fashion-mnist', 'cifar10', 'cifar100', 'sst'],
-                       help='Dataset name')
+    # 数据集参数 / Dataset parameters
+    parser.add_argument('--dataset', type=str, default='cifar10',
+                       choices=['mnist', 'fashion-mnist', 'cifar10', 'cifar100'],
+                       help='Dataset name / 数据集名称')
     
     parser.add_argument('--num_clients', type=int, default=100,
-                       help='Number of clients')
+                       help='Number of clients / 客户端数量')
     
-    # 分布 / Distribution
-    parser.add_argument('--distribution', type=str, default='iid',
+    # 数据分布 / Data distribution
+    parser.add_argument('--distribution', type=str, default='non-iid-dir',
                        choices=['iid', 'non-iid-dir'],
-                       help='Data distribution type')
+                       help='Data distribution type / 数据分布类型')
     
     parser.add_argument('--alpha', type=float, default=0.5,
-                       help='Dirichlet alpha for non-iid-dir')
+                       help='Dirichlet alpha for non-iid / Dirichlet参数')
     
-    # 训练 / Training
+    # 训练参数 / Training parameters
     parser.add_argument('--num_rounds', type=int, default=50,
-                       help='Number of communication rounds')
+                       help='Number of communication rounds / 通信轮次')
     
     parser.add_argument('--local_epochs', type=int, default=5,
-                       help='Local epochs per round')
+                       help='Local epochs per round / 每轮本地训练轮次')
     
     parser.add_argument('--batch_size', type=int, default=32,
-                       help='Batch size')
+                       help='Batch size / 批次大小')
     
     parser.add_argument('--learning_rate', type=float, default=0.01,
-                       help='Learning rate')
+                       help='Learning rate / 学习率')
     
     parser.add_argument('--standalone_epochs', type=int, default=20,
-                       help='Standalone training epochs')
+                       help='Standalone training epochs / 独立训练轮次')
     
-    # 时间片 / Time slice
+    # 时间片参数 / Time slice parameters
     parser.add_argument('--rounds_per_slice', type=int, default=5,
-                       help='Rounds per time slice (τ)')
+                       help='Rounds per time slice (τ) / 每个时间片的轮次数')
     
-    # 其他 / Others
+    # 稀疏化参数 / Sparsification parameters
+    parser.add_argument('--sparsification_mode', type=str, default='magnitude',
+                       choices=['magnitude', 'random', 'structured'],
+                       help='Sparsification mode / 稀疏化模式')
+    
+    parser.add_argument('--lambda_coef', type=float, default=2.0,
+                       help='Lambda coefficient for keep ratio calculation / 保留率计算的λ系数')
+    
+    parser.add_argument('--min_keep_ratio', type=float, default=0.1,
+                       help='Minimum keep ratio / 最小保留率')
+    
+    # 其他参数 / Other parameters
     parser.add_argument('--seed', type=int, default=42,
-                       help='Random seed')
+                       help='Random seed / 随机种子')
     
     return parser.parse_args()
 
@@ -440,13 +504,8 @@ def main():
     """主函数 / Main function"""
     args = parse_args()
     
-    # 设置设备 / Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    import config
-    config.DEVICE = device
-    
     # 运行实验 / Run experiment
-    experiment = FederatedLearningExperiment(args)
+    experiment = SparsificationFederatedLearning(args)
     final_metrics = experiment.run_experiment()
     
     # 打印最终结果 / Print final results
@@ -455,6 +514,7 @@ def main():
     print(f"{'='*80}")
     print(f"Experiment: {experiment.experiment_name}")
     print(f"\nKey Results:")
+    print(f"  Methodology: Sparsification-based Differentiation")
     print(f"  Final Avg Accuracy: {final_metrics['client_accuracy']['avg_final']:.4f}")
     print(f"  PCC: {final_metrics['pcc']:.4f}")
     print(f"  IPR: {final_metrics['ipr']['final_ipr']:.4f} ({final_metrics['ipr']['ipr_percentage']:.2f}%)")
