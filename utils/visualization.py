@@ -11,11 +11,12 @@ import os
 from datetime import datetime
 import seaborn as sns
 
-plt.rcParams['font.family'] = 'DejaVu Sans'  # 或 'Liberation Sans'
+# 设置字体，避免 Arial 警告
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['axes.unicode_minus'] = False
 
 # 如果需要显示中文，使用：
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'DejaVu Sans']
-# plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 class Visualizer:
     """
@@ -38,8 +39,8 @@ class Visualizer:
         plt.style.use('seaborn-v0_8-darkgrid')
         sns.set_palette("husl")
         
-        # 字体设置 / Font settings
-        plt.rcParams['font.family'] = ['DejaVu Sans', 'Arial', 'sans-serif']
+        # 字体设置 - 只使用系统可用的字体 / Font settings - use only available fonts
+        plt.rcParams['font.family'] = 'DejaVu Sans'
         plt.rcParams['axes.unicode_minus'] = False
         
         print(f"Visualizer initialized. Figures will be saved to: {output_dir}")
