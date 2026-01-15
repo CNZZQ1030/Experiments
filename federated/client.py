@@ -1,8 +1,7 @@
 """
-federated/client.py
-联邦学习客户端 / Federated Learning Client
-每个客户端拥有独立的训练集和测试集
-Each client has independent training and test sets
+federated/client.py - 重构版本
+联邦学习客户端 - 支持梯度累积更新
+Federated Client - Gradient Accumulation Update
 """
 
 import torch
@@ -10,252 +9,274 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import copy
-import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple, Optional
 
 
 class FederatedClient:
     """
-    联邦学习客户端 / Federated Learning Client
-    支持独立训练和联邦学习训练
-    Supports standalone training and federated learning training
+    联邦学习客户端 - 梯度累积版本
+    
+    核心改变 / Core Changes:
+    1. 保持本地模型状态 / Maintain local model state
+    2. 接收稀疏化梯度 / Receive sparsified gradients
+    3. 应用梯度到本地模型 / Apply gradients to local model
+    
+    公式 / Formula:
+        w_local^(t+1) = w_local^(t) + η * sparse(Δw_global)
     """
     
-    def __init__(self, client_id: int, model: nn.Module, 
-                 train_dataloader: DataLoader, test_dataloader: DataLoader,
-                 num_train_samples: int, num_test_samples: int,
-                 device: torch.device = torch.device("cpu")):
+    def __init__(self, 
+                 client_id: int,
+                 model: nn.Module,
+                 train_dataloader: DataLoader,
+                 test_dataloader: DataLoader,
+                 num_train_samples: int,
+                 num_test_samples: int,
+                 device: torch.device):
         """
-        初始化客户端 / Initialize client
+        初始化客户端
         
         Args:
-            client_id: 客户端ID / Client ID
-            model: 模型 / Model
-            train_dataloader: 训练数据加载器 / Training dataloader
-            test_dataloader: 测试数据加载器 / Test dataloader
-            num_train_samples: 训练样本数 / Number of training samples
-            num_test_samples: 测试样本数 / Number of test samples
-            device: 计算设备 / Computing device
+            client_id: 客户端ID
+            model: 模型架构（用于创建本地模型）
+            train_dataloader: 训练数据加载器
+            test_dataloader: 测试数据加载器
+            num_train_samples: 训练样本数
+            num_test_samples: 测试样本数
+            device: 计算设备
         """
         self.client_id = client_id
-        self.model = copy.deepcopy(model).to(device)
-        self.train_dataloader = train_dataloader
-        self.test_dataloader = test_dataloader
         self.device = device
         
-        # 样本数量 / Sample counts
+        # 创建本地模型（独立副本）
+        self.local_model = copy.deepcopy(model).to(device)
+        
+        # 数据加载器
+        self.train_dataloader = train_dataloader
+        self.test_dataloader = test_dataloader
         self.num_train_samples = num_train_samples
         self.num_test_samples = num_test_samples
         
-        # 独立训练性能 / Standalone performance
+        # 损失函数
+        self.criterion = nn.CrossEntropyLoss()
+        
+        # 会员等级
+        self.membership_level = 'bronze'
+        
+        # 训练历史
+        self.train_history = {
+            'loss': [],
+            'accuracy': []
+        }
+        
+        # 独立训练基准
         self.standalone_accuracy = None
-        self.standalone_loss = None
-        self.standalone_model = None
-        
-        # 联邦学习性能 / Federated performance
-        self.federated_accuracy = None
-        self.federated_loss = None
-        
-        # 训练统计 / Training statistics
-        self.training_time = 0
-        
-        # 会员等级 / Membership level
-        self.membership_level = "bronze"
-        
-        # 贡献度历史 / Contribution history
-        self.contribution_history = []
-        
-        if client_id < 5:  # 只打印前5个客户端
-            print(f"Client {client_id} initialized: Train={self.num_train_samples}, Test={self.num_test_samples}")
     
-    def train_standalone(self, epochs: int = 10, lr: float = 0.01) -> Tuple[float, float]:
+    def get_local_model_weights(self) -> Dict[str, torch.Tensor]:
+        """获取本地模型权重"""
+        return {
+            name: param.data.clone().detach()
+            for name, param in self.local_model.named_parameters()
+        }
+    
+    def set_local_model_weights(self, weights: Dict[str, torch.Tensor]):
+        """设置本地模型权重"""
+        with torch.no_grad():
+            for name, param in self.local_model.named_parameters():
+                if name in weights:
+                    param.data = weights[name].to(self.device).clone()
+    
+    def apply_gradient_update(self, sparse_gradient: Dict[str, torch.Tensor], 
+                             learning_rate: float = 1.0):
         """
-        独立训练（不参与联邦学习）/ Standalone training
-        在客户端自己的测试集上评估
-        Evaluated on client's own test set
+        应用稀疏梯度到本地模型
+        
+        核心操作：w_local = w_local + lr * sparse(Δw_global)
         
         Args:
-            epochs: 训练轮次 / Training epochs
-            lr: 学习率 / Learning rate
-            
-        Returns:
-            (独立准确率, 独立损失) / (standalone accuracy, standalone loss)
+            sparse_gradient: 稀疏化的全局梯度
+            learning_rate: 梯度应用的学习率（默认1.0，即完全应用）
         """
-        # 创建独立模型副本 / Create standalone model
-        self.standalone_model = copy.deepcopy(self.model)
-        self.standalone_model.train()
+        with torch.no_grad():
+            for name, param in self.local_model.named_parameters():
+                if name in sparse_gradient:
+                    # 应用稀疏梯度
+                    gradient_update = sparse_gradient[name].to(self.device)
+                    param.data += learning_rate * gradient_update
+    
+    def train_federated(self, 
+                       global_weights: Optional[Dict[str, torch.Tensor]] = None,
+                       epochs: int = 1,
+                       lr: float = 0.01) -> Tuple[Dict[str, torch.Tensor], Dict]:
+        """
+        联邦学习本地训练
         
-        optimizer = optim.SGD(self.standalone_model.parameters(), lr=lr, momentum=0.9)
-        criterion = nn.CrossEntropyLoss()
+        核心流程 / Core Workflow:
+        1. 如果是第一轮，初始化本地模型为全局模型
+        2. 否则，使用当前本地模型继续训练
+        3. 训练后返回更新后的权重（用于服务器计算梯度）
         
-        # 训练 / Training
+        Args:
+            global_weights: 全局模型权重（仅第一轮使用）
+            epochs: 本地训练轮次
+            lr: 学习率
+        
+        Returns:
+            updated_weights: 训练后的模型权重
+            train_info: 训练信息
+        """
+        # 第一轮：初始化本地模型
+        if global_weights is not None and self.standalone_accuracy is None:
+            self.set_local_model_weights(global_weights)
+        
+        # 设置为训练模式
+        self.local_model.train()
+        
+        # 优化器
+        optimizer = optim.SGD(
+            self.local_model.parameters(),
+            lr=lr,
+            momentum=0.9,
+            weight_decay=1e-4
+        )
+        
+        # 训练
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+        
         for epoch in range(epochs):
+            epoch_loss = 0.0
+            epoch_correct = 0
+            epoch_samples = 0
+            
             for batch_idx, (data, target) in enumerate(self.train_dataloader):
                 data, target = data.to(self.device), target.to(self.device)
                 
                 optimizer.zero_grad()
-                output = self.standalone_model(data)
-                loss = criterion(output, target)
+                output = self.local_model(data)
+                loss = self.criterion(output, target)
                 loss.backward()
                 optimizer.step()
-        
-        # 在测试集上评估 / Evaluate on test set
-        self.standalone_accuracy, self.standalone_loss = self._evaluate_model(
-            self.standalone_model, self.test_dataloader
-        )
-        
-        if self.client_id < 5:  # 只打印前5个客户端
-            print(f"Client {self.client_id} - Standalone Accuracy: {self.standalone_accuracy:.4f}")
-        
-        return self.standalone_accuracy, self.standalone_loss
-    
-    def train_federated(self, global_weights: Dict[str, torch.Tensor],
-                       epochs: int = 1, lr: float = 0.01) -> Tuple[Dict, Dict]:
-        """
-        联邦学习训练 / Federated learning training
-        在客户端自己的测试集上评估
-        Evaluated on client's own test set
-        
-        Args:
-            global_weights: 全局模型权重（可能是个性化的）/ Global model weights
-            epochs: 本地训练轮次 / Local training epochs
-            lr: 学习率 / Learning rate
+                
+                # 统计
+                epoch_loss += loss.item() * data.size(0)
+                pred = output.argmax(dim=1, keepdim=True)
+                epoch_correct += pred.eq(target.view_as(pred)).sum().item()
+                epoch_samples += data.size(0)
             
-        Returns:
-            (更新后的模型权重, 训练信息) / (updated weights, training info)
-        """
-        # 加载全局模型 / Load global model
-        self.model.load_state_dict(global_weights)
-        self.model.train()
+            total_loss += epoch_loss
+            total_correct += epoch_correct
+            total_samples += epoch_samples
         
-        optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
-        criterion = nn.CrossEntropyLoss()
+        # 计算平均指标
+        avg_loss = total_loss / (total_samples * epochs)
+        avg_accuracy = total_correct / (total_samples * epochs)
         
-        # 记录训练时间 / Record training time
-        start_time = time.time()
+        # 获取更新后的权重
+        updated_weights = self.get_local_model_weights()
         
-        total_loss = 0
-        batch_count = 0
+        # 测试准确率
+        test_accuracy = self.evaluate()
         
-        # 本地训练 / Local training
-        for epoch in range(epochs):
-            for batch_idx, (data, target) in enumerate(self.train_dataloader):
-                data, target = data.to(self.device), target.to(self.device)
-                
-                optimizer.zero_grad()
-                output = self.model(data)
-                loss = criterion(output, target)
-                loss.backward()
-                optimizer.step()
-                
-                total_loss += loss.item()
-                batch_count += 1
-        
-        # 计算训练时间 / Calculate training time
-        self.training_time = time.time() - start_time
-        
-        # 在测试集上评估 / Evaluate on test set
-        self.federated_accuracy, self.federated_loss = self._evaluate_model(
-            self.model, self.test_dataloader
-        )
-        
-        # 准备训练信息 / Prepare training info
-        avg_loss = total_loss / batch_count if batch_count > 0 else 0
+        # 训练信息
         train_info = {
             'client_id': self.client_id,
             'num_samples': self.num_train_samples,
-            'training_time': self.training_time,
-            'avg_loss': avg_loss,
-            'federated_accuracy': self.federated_accuracy,
-            'federated_loss': self.federated_loss,
-            'membership_level': self.membership_level,
-            'model_quality': 1.0 / (1.0 + avg_loss),
+            'train_loss': avg_loss,
+            'train_accuracy': avg_accuracy,
+            'federated_accuracy': test_accuracy,
+            'membership_level': self.membership_level
         }
         
-        return self.model.state_dict(), train_info
+        # 记录历史
+        self.train_history['loss'].append(avg_loss)
+        self.train_history['accuracy'].append(test_accuracy)
+        
+        return updated_weights, train_info
     
-    def _evaluate_model(self, model: nn.Module, dataloader: DataLoader) -> Tuple[float, float]:
+    def evaluate(self) -> float:
         """
-        评估模型 / Evaluate model
+        评估模型性能
         
-        Args:
-            model: 要评估的模型 / Model to evaluate
-            dataloader: 数据加载器 / Dataloader
-            
         Returns:
-            (准确率, 损失) / (accuracy, loss)
+            accuracy: 测试准确率
         """
-        model.eval()
-        criterion = nn.CrossEntropyLoss()
+        self.local_model.eval()
         
-        test_loss = 0
         correct = 0
         total = 0
         
         with torch.no_grad():
-            for data, target in dataloader:
+            for data, target in self.test_dataloader:
                 data, target = data.to(self.device), target.to(self.device)
-                output = model(data)
-                test_loss += criterion(output, target).item()
-                pred = output.argmax(dim=1)
-                correct += pred.eq(target).sum().item()
-                total += len(data)
+                output = self.local_model(data)
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+                total += data.size(0)
         
-        accuracy = correct / total if total > 0 else 0
-        avg_loss = test_loss / len(dataloader) if len(dataloader) > 0 else 0
-        
-        return accuracy, avg_loss
+        accuracy = correct / total if total > 0 else 0.0
+        return accuracy
     
-    def update_membership_level(self, new_level: str) -> None:
-        """更新会员等级 / Update membership level"""
-        self.membership_level = new_level
-    
-    def get_performance_improvement(self) -> float:
+    def train_standalone(self, epochs: int = 20, lr: float = 0.01) -> Tuple[float, float]:
         """
-        获取性能改进 / Get performance improvement
-        计算联邦学习相对于独立训练的改进
-        Calculate improvement of federated over standalone
+        独立训练（用于基准对比）
+        
+        Args:
+            epochs: 训练轮次
+            lr: 学习率
         
         Returns:
-            性能改进百分比 / Performance improvement percentage
+            final_accuracy: 最终准确率
+            best_accuracy: 最佳准确率
         """
-        if self.standalone_accuracy is None or self.federated_accuracy is None:
-            return 0.0
+        self.local_model.train()
         
-        if self.standalone_accuracy == 0:
-            return 100.0 if self.federated_accuracy > 0 else 0.0
+        optimizer = optim.SGD(
+            self.local_model.parameters(),
+            lr=lr,
+            momentum=0.9,
+            weight_decay=1e-4
+        )
         
-        improvement = ((self.federated_accuracy - self.standalone_accuracy) 
-                      / self.standalone_accuracy) * 100
-        return improvement
+        best_accuracy = 0.0
+        
+        for epoch in range(epochs):
+            # 训练
+            for batch_idx, (data, target) in enumerate(self.train_dataloader):
+                data, target = data.to(self.device), target.to(self.device)
+                
+                optimizer.zero_grad()
+                output = self.local_model(data)
+                loss = self.criterion(output, target)
+                loss.backward()
+                optimizer.step()
+            
+            # 评估
+            accuracy = self.evaluate()
+            best_accuracy = max(best_accuracy, accuracy)
+        
+        final_accuracy = self.evaluate()
+        self.standalone_accuracy = final_accuracy
+        
+        return final_accuracy, best_accuracy
     
-    def get_absolute_improvement(self) -> float:
-        """
-        获取绝对性能改进 / Get absolute performance improvement
-        
-        Returns:
-            绝对改进值 / Absolute improvement value
-        """
-        if self.standalone_accuracy is None or self.federated_accuracy is None:
-            return 0.0
-        
-        return self.federated_accuracy - self.standalone_accuracy
+    def update_membership_level(self, level: str):
+        """更新会员等级"""
+        self.membership_level = level
     
-    def get_client_metrics(self) -> Dict:
-        """
-        获取客户端指标 / Get client metrics
-        
-        Returns:
-            客户端指标字典 / Client metrics dictionary
-        """
-        return {
-            'client_id': self.client_id,
-            'standalone_accuracy': self.standalone_accuracy,
-            'federated_accuracy': self.federated_accuracy,
-            'performance_improvement': self.get_performance_improvement(),
-            'absolute_improvement': self.get_absolute_improvement(),
-            'membership_level': self.membership_level,
-            'num_train_samples': self.num_train_samples,
-            'num_test_samples': self.num_test_samples,
-            'training_time': self.training_time
-        }
+    def get_membership_level(self) -> str:
+        """获取会员等级"""
+        return self.membership_level
+    
+    def get_train_history(self) -> Dict:
+        """获取训练历史"""
+        return self.train_history
+    
+    def get_num_train_samples(self) -> int:
+        """获取训练样本数"""
+        return self.num_train_samples
+    
+    def get_num_test_samples(self) -> int:
+        """获取测试样本数"""
+        return self.num_test_samples

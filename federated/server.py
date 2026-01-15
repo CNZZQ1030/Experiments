@@ -1,276 +1,270 @@
 """
-federated/server_sparsification.py
-联邦学习服务器 - 集成稀疏化差异模型分发
-Federated Learning Server - Integrated with Sparsification-based Distribution
+federated/server.py - 重构版本
+联邦学习服务器 - 基于梯度稀疏化的差异化分发
+Federated Server - Gradient Sparsification-based Differentiated Distribution
 """
 
 import torch
-import torch.nn as nn
-import copy
-from typing import Dict, List, Tuple, Optional
 import numpy as np
+from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+import copy
+
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from incentive.points_calculator import CGSVContributionCalculator
 from incentive.sparsification_distributor import SparsificationDistributor
-from config import IncentiveConfig
+from incentive.points_calculator import CGSVCalculator
 
 
-class FederatedServerWithSparsification:
+class FederatedServerWithGradientSparsification:
     """
-    联邦学习服务器 - 稀疏化版本 / Federated Learning Server - Sparsification Version
+    联邦学习服务器 - 梯度稀疏化版本
     
     核心流程 / Core Workflow:
-    1. 收集客户端更新 / Collect client updates
-    2. 计算贡献度 / Calculate contributions
-    3. 聚合更新得到全局模型 / Aggregate to get global model
-    4. 基于贡献度对全局模型进行差异化稀疏 / Apply differentiated sparsification based on contributions
-    5. 分发稀疏化模型给客户端 / Distribute sparsified models to clients
+    1. 收集客户端梯度 / Collect client gradients
+    2. 聚合得到全局梯度 / Aggregate to global gradient  
+    3. 对全局梯度进行差异化稀疏 / Sparsify global gradient differentially
+    4. 分发稀疏梯度给客户端 / Distribute sparse gradients to clients
+    5. 客户端应用到本地模型 / Clients apply to local models
     """
     
-    def __init__(self, model: nn.Module, device: torch.device = torch.device("cpu")):
+    def __init__(self, model, device):
         """
-        初始化服务器 / Initialize server
+        初始化服务器
         
         Args:
-            model: 全局模型 / Global model
-            device: 计算设备 / Computing device
+            model: 全局模型
+            device: 计算设备
         """
-        self.global_model = copy.deepcopy(model).to(device)
         self.device = device
+        self.global_model = copy.deepcopy(model).to(device)
         
-        # CGSV贡献度计算器 / CGSV contribution calculator
-        self.cgsv_calculator = CGSVContributionCalculator(
-            epsilon=IncentiveConfig.CGSV_EPSILON
-        )
+        # 获取全局模型权重（用于初始化）
+        self.global_model_weights = {
+            name: param.data.clone().detach()
+            for name, param in self.global_model.named_parameters()
+        }
         
-        # 稀疏化分发器 / Sparsification distributor
-        self.sparsification_distributor = SparsificationDistributor(
-            base_model=model,
-            device=device,
-            sparsity_ranges=IncentiveConfig.LEVEL_SPARSITY_RANGES,
-            min_keep_ratio=IncentiveConfig.MIN_KEEP_RATIO,
-            lambda_coefficient=IncentiveConfig.LAMBDA,
-            sparsification_mode=IncentiveConfig.SPARSIFICATION_MODE
-        )
+        # 客户端状态追踪
+        self.client_gradients = {}  # 存储客户端梯度
+        self.client_train_info = {}  # 存储训练信息
+        self.client_num_samples = {}  # 存储样本数量
         
-        # 存储客户端信息 / Store client information
-        self.client_contributions = {}  # 瞬时贡献 s_{i,t}
-        self.client_gradients = {}      # 客户端梯度
-        self.client_updates = {}        # 客户端模型权重
-        self.client_levels = {}         # 客户端等级
-        self.client_num_samples = {}    # 客户端样本数
+        # 全局聚合梯度
+        self.aggregated_gradient = None
         
-        # 训练历史 / Training history
-        self.round_history = []
-        self.sparsification_history = []
+        # 客户端上一轮的模型权重（用于梯度计算）
+        self.client_previous_weights = {}
         
-        print(f"FederatedServerWithSparsification initialized")
-        print(f"  Sparsification Mode: {IncentiveConfig.SPARSIFICATION_MODE}")
-        print(f"  Lambda: {IncentiveConfig.LAMBDA}")
-        print(f"  Min Keep Ratio: {IncentiveConfig.MIN_KEEP_RATIO}")
+        # 稀疏化分发器
+        self.sparsification_distributor = SparsificationDistributor(device)
         
-    def collect_client_updates(self, client_id: int,
-                              client_weights: Dict[str, torch.Tensor],
-                              client_info: Dict) -> None:
+        # 贡献度计算器
+        self.contribution_calculator = CGSVCalculator()
+        
+        # 统计信息
+        self.round_contributions = {}
+        self.round_stats = defaultdict(list)
+        
+        print(f"✓ Server initialized (Gradient Sparsification Mode)")
+    
+    def reset_round(self):
+        """重置轮次状态"""
+        self.client_gradients.clear()
+        self.client_train_info.clear()
+        self.client_num_samples.clear()
+        self.aggregated_gradient = None
+    
+    def collect_client_updates(self, client_id: int, 
+                              updated_weights: Dict[str, torch.Tensor],
+                              train_info: Dict):
         """
-        收集客户端更新 / Collect client updates
+        收集客户端更新并计算梯度
+        
+        核心改变：不再直接存储模型权重，而是计算并存储梯度
         
         Args:
-            client_id: 客户端ID / Client ID
-            client_weights: 客户端模型权重 / Client model weights
-            client_info: 客户端信息 / Client information
+            client_id: 客户端ID
+            updated_weights: 客户端训练后的模型权重
+            train_info: 训练信息（损失、准确率等）
         """
-        # 计算梯度 g_{i,t} = θ_{new} - θ_{old}
+        # 获取客户端上一轮的权重
+        if client_id not in self.client_previous_weights:
+            # 第一轮：使用全局初始模型作为参考
+            previous_weights = self.global_model_weights
+        else:
+            previous_weights = self.client_previous_weights[client_id]
+        
+        # 计算梯度：Δw = w_new - w_old
         gradient = {}
-        global_weights = self.global_model.state_dict()
+        for name in updated_weights.keys():
+            gradient[name] = updated_weights[name].to(self.device) - \
+                           previous_weights[name].to(self.device)
         
-        for key in client_weights.keys():
-            gradient[key] = client_weights[key] - global_weights[key]
-        
+        # 存储梯度和训练信息
         self.client_gradients[client_id] = gradient
-        self.client_updates[client_id] = client_weights
-        self.client_num_samples[client_id] = client_info.get('num_samples', 1)
-        self.client_levels[client_id] = client_info.get('membership_level', 'bronze')
+        self.client_train_info[client_id] = train_info
+        self.client_num_samples[client_id] = train_info.get('num_samples', 1)
+        
+        # 更新客户端的上一轮权重（用于下一轮计算梯度）
+        self.client_previous_weights[client_id] = {
+            name: param.clone().detach()
+            for name, param in updated_weights.items()
+        }
+    
+    def update_global_model(self):
+        """
+        更新全局模型 - 使用FedAvg聚合梯度
+        
+        核心改变：聚合的是梯度，不是模型权重
+        公式：Δw_global = Σ(n_k/n * Δw_k)
+        然后：w_global = w_global + Δw_global
+        """
+        if not self.client_gradients:
+            print("Warning: No client gradients to aggregate")
+            return
+        
+        # 计算总样本数
+        total_samples = sum(self.client_num_samples.values())
+        
+        # 初始化聚合梯度
+        self.aggregated_gradient = {}
+        sample_gradient = next(iter(self.client_gradients.values()))
+        
+        for name in sample_gradient.keys():
+            self.aggregated_gradient[name] = torch.zeros_like(
+                sample_gradient[name], 
+                device=self.device
+            )
+        
+        # FedAvg聚合：加权平均梯度
+        for client_id, gradient in self.client_gradients.items():
+            weight = self.client_num_samples[client_id] / total_samples
+            
+            for name in gradient.keys():
+                self.aggregated_gradient[name] += weight * gradient[name].to(self.device)
+        
+        # 更新全局模型：w_global = w_global + Δw_global
+        with torch.no_grad():
+            for name, param in self.global_model.named_parameters():
+                if name in self.aggregated_gradient:
+                    param.data += self.aggregated_gradient[name]
+        
+        # 更新全局模型权重字典
+        self.global_model_weights = {
+            name: param.data.clone().detach()
+            for name, param in self.global_model.named_parameters()
+        }
+    
+    def distribute_sparsified_gradients(self, membership_levels: Dict[int, str]) -> Dict[int, Dict]:
+        """
+        分发稀疏化的梯度给客户端
+        
+        核心创新：对全局聚合梯度进行差异化稀疏，而不是对模型权重稀疏
+        
+        Args:
+            membership_levels: 客户端会员等级 {client_id: level}
+        
+        Returns:
+            Dict[client_id, sparse_gradient]: 每个客户端的稀疏化梯度
+        """
+        if self.aggregated_gradient is None:
+            raise RuntimeError("Must call update_global_model() before distributing gradients")
+        
+        # 计算贡献度排名（用于确定稀疏率）
+        contributions = self.round_contributions.get('current', {})
+        
+        # 使用稀疏化分发器对梯度进行差异化稀疏
+        sparsified_gradients = self.sparsification_distributor.distribute_sparsified_gradients(
+            global_gradient=self.aggregated_gradient,
+            membership_levels=membership_levels,
+            contributions=contributions
+        )
+        
+        return sparsified_gradients
     
     def calculate_all_contributions(self, round_num: int) -> Dict[int, float]:
         """
-        计算所有客户端的瞬时贡献 / Calculate instantaneous contributions for all clients
+        计算所有客户端的贡献度（CGSV）
         
         Args:
-            round_num: 当前轮次 / Current round
-            
-        Returns:
-            贡献度字典 {client_id: s_{i,t}}
-        """
-        # 计算聚合梯度 / Calculate aggregated gradient
-        aggregated_gradient = self._calculate_aggregated_gradient()
+            round_num: 当前轮次
         
-        # 使用CGSV计算贡献度 / Calculate contributions using CGSV
-        contributions = self.cgsv_calculator.calculate_all_contributions(
-            round_num=round_num,
+        Returns:
+            Dict[client_id, contribution]: 贡献度字典
+        """
+        if not self.client_gradients:
+            return {}
+        
+        contributions = self.contribution_calculator.calculate_all_contributions(
             client_gradients=self.client_gradients,
-            aggregated_gradient=aggregated_gradient
+            aggregated_gradient=self.aggregated_gradient,
+            client_num_samples=self.client_num_samples
         )
         
-        self.client_contributions = contributions
+        # 存储贡献度
+        self.round_contributions[round_num] = contributions
+        self.round_contributions['current'] = contributions
+        
+        # 统计信息
+        if contributions:
+            contrib_values = list(contributions.values())
+            self.round_stats['contributions_mean'].append(np.mean(contrib_values))
+            self.round_stats['contributions_std'].append(np.std(contrib_values))
+        
         return contributions
     
-    def _calculate_aggregated_gradient(self) -> Dict[str, torch.Tensor]:
-        """
-        计算聚合梯度 / Calculate aggregated gradient
-        使用FedAvg加权平均 / Use FedAvg weighted average
-        
-        Returns:
-            聚合梯度 / Aggregated gradient
-        """
-        aggregated = {}
-        total_samples = sum(self.client_num_samples.values())
-        
-        if total_samples == 0:
-            return aggregated
-        
-        # 初始化 / Initialize
-        for key in next(iter(self.client_gradients.values())).keys():
-            sample_tensor = next(iter(self.client_gradients.values()))[key]
-            aggregated[key] = torch.zeros_like(sample_tensor, dtype=torch.float32)
-        
-        # 加权平均 / Weighted average
-        for client_id, gradient in self.client_gradients.items():
-            weight = self.client_num_samples[client_id] / total_samples
-            for key in gradient.keys():
-                aggregated[key] += gradient[key].float() * weight
-        
-        return aggregated
-    
-    def update_global_model(self) -> None:
-        """
-        更新全局模型 / Update global model
-        使用FedAvg算法进行聚合 / Use FedAvg for aggregation
-        """
-        if not self.client_updates:
-            return
-        
-        # 计算总样本数 / Calculate total samples
-        total_samples = sum(self.client_num_samples.values())
-        
-        if total_samples == 0:
-            # 如果没有样本信息，使用均匀权重 / Use uniform weights if no sample info
-            total_samples = len(self.client_updates)
-            for client_id in self.client_updates:
-                self.client_num_samples[client_id] = 1
-        
-        # 初始化聚合权重 / Initialize aggregated weights
-        aggregated_weights = {}
-        
-        # FedAvg聚合 / FedAvg aggregation
-        for client_id, client_weights in self.client_updates.items():
-            weight_factor = self.client_num_samples[client_id] / total_samples
-            
-            for key in client_weights.keys():
-                if key not in aggregated_weights:
-                    aggregated_weights[key] = torch.zeros_like(client_weights[key], dtype=torch.float32)
-                
-                if client_weights[key].dtype in [torch.int32, torch.int64, torch.long]:
-                    aggregated_weights[key] += client_weights[key].float() * weight_factor
-                else:
-                    aggregated_weights[key] += client_weights[key] * weight_factor
-        
-        # 转换回原始类型 / Convert back to original dtype
-        for key in aggregated_weights.keys():
-            sample_weight = next(iter(self.client_updates.values()))[key]
-            if sample_weight.dtype in [torch.int32, torch.int64, torch.long]:
-                aggregated_weights[key] = aggregated_weights[key].round().to(sample_weight.dtype)
-        
-        # 更新全局模型 / Update global model
-        self.global_model.load_state_dict(aggregated_weights)
-        
-        print(f"Global model updated using FedAvg (total samples: {total_samples})")
-    
-    def distribute_sparsified_models(self,
-                                    client_levels: Dict[int, str]) -> Dict[int, Dict[str, torch.Tensor]]:
-        """
-        基于稀疏化分发差异化模型 / Distribute differentiated models using sparsification
-        
-        核心思想：对全局模型进行不同程度的稀疏化
-        Core idea: Apply different levels of sparsification to global model
-        
-        Args:
-            client_levels: 客户端等级 {client_id: level}
-            
-        Returns:
-            稀疏化模型字典 {client_id: sparsified_weights}
-        """
-        # 获取全局模型权重 / Get global model weights
-        global_weights = self.global_model.state_dict()
-        
-        # 使用稀疏化分发器创建差异化模型 / Create differentiated models using sparsification
-        sparsified_models = self.sparsification_distributor.distribute_all_sparsified_models(
-            client_levels=client_levels,
-            client_contributions=self.client_contributions,
-            global_model_weights=global_weights
-        )
-        
-        # 记录统计信息 / Record statistics
-        stats = self.sparsification_distributor.get_sparsification_statistics()
-        self.sparsification_history.append(stats)
-        
-        return sparsified_models
-    
     def get_global_model_weights(self) -> Dict[str, torch.Tensor]:
-        """获取全局模型权重 / Get global model weights"""
-        return self.global_model.state_dict()
-    
-    def reset_round(self) -> None:
-        """重置轮次数据 / Reset round data"""
-        self.client_gradients.clear()
-        self.client_updates.clear()
-        self.client_contributions.clear()
-        self.client_num_samples.clear()
-    
-    def get_contribution_statistics(self) -> Dict:
-        """获取贡献度统计信息 / Get contribution statistics"""
-        contrib_stats = self.cgsv_calculator.get_contribution_statistics()
-        
-        # 添加稀疏化统计 / Add sparsification statistics
-        if self.sparsification_history:
-            latest_sparse_stats = self.sparsification_history[-1]
-            contrib_stats['sparsification'] = latest_sparse_stats
-        
-        return contrib_stats
-    
-    def print_contribution_summary(self):
-        """打印贡献度和稀疏化摘要 / Print contribution and sparsification summary"""
-        # 打印CGSV贡献度统计 / Print CGSV contribution statistics
-        self.cgsv_calculator.print_summary()
-        
-        # 打印稀疏化统计 / Print sparsification statistics
-        self.sparsification_distributor.print_sparsification_summary()
+        """获取全局模型权重（用于客户端初始化）"""
+        return copy.deepcopy(self.global_model_weights)
     
     def get_round_summary(self, round_num: int) -> Dict:
-        """
-        获取轮次摘要 / Get round summary
-        
-        Args:
-            round_num: 轮次号 / Round number
-            
-        Returns:
-            轮次摘要信息 / Round summary information
-        """
-        sparse_stats = self.sparsification_distributor.get_sparsification_statistics()
+        """获取轮次摘要信息"""
+        contributions = self.round_contributions.get(round_num, {})
         
         summary = {
             'round': round_num,
-            'num_clients': len(self.client_updates),
+            'num_clients': len(self.client_gradients),
             'contribution_stats': {
-                'mean': np.mean(list(self.client_contributions.values())) if self.client_contributions else 0,
-                'std': np.std(list(self.client_contributions.values())) if self.client_contributions else 0,
-                'min': min(self.client_contributions.values()) if self.client_contributions else 0,
-                'max': max(self.client_contributions.values()) if self.client_contributions else 0
+                'mean': np.mean(list(contributions.values())) if contributions else 0,
+                'std': np.std(list(contributions.values())) if contributions else 0,
+                'min': np.min(list(contributions.values())) if contributions else 0,
+                'max': np.max(list(contributions.values())) if contributions else 0
             },
-            'sparsification_stats': sparse_stats
+            'sparsification_stats': self.sparsification_distributor.get_sparsification_statistics()
         }
         
         return summary
+    
+    def get_contribution_statistics(self) -> Dict:
+        """获取贡献度统计信息"""
+        all_contributions = []
+        for round_num, contrib_dict in self.round_contributions.items():
+            if round_num != 'current' and isinstance(contrib_dict, dict):
+                all_contributions.extend(contrib_dict.values())
+        
+        if not all_contributions:
+            return {}
+        
+        return {
+            'mean': float(np.mean(all_contributions)),
+            'std': float(np.std(all_contributions)),
+            'min': float(np.min(all_contributions)),
+            'max': float(np.max(all_contributions)),
+            'median': float(np.median(all_contributions))
+        }
+    
+    def print_contribution_summary(self):
+        """打印贡献度摘要"""
+        stats = self.get_contribution_statistics()
+        if stats:
+            print(f"\n{'='*80}")
+            print("Contribution Statistics (CGSV)")
+            print(f"{'='*80}")
+            print(f"Mean: {stats['mean']:.4f}")
+            print(f"Std:  {stats['std']:.4f}")
+            print(f"Range: [{stats['min']:.4f}, {stats['max']:.4f}]")
+            print(f"Median: {stats['median']:.4f}")
+            print(f"{'='*80}")

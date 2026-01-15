@@ -1,6 +1,9 @@
 """
-config_updated.py - 基于稀疏化的差异化模型配置
-Configuration for Sparsification-based Differentiated Model Distribution
+config.py - 基于稀疏化的差异化模型配置（重构版）
+Configuration for Sparsification-based Differentiated Model Distribution (Refactored)
+
+新增：基于贡献度的加权聚合配置
+Added: Contribution-Aware Aggregation Configuration
 """
 
 import torch
@@ -100,6 +103,33 @@ class IncentiveConfig:
     # 是否使用渐进式稀疏化 / Progressive sparsification
     PROGRESSIVE_SPARSIFICATION = False
     SPARSIFICATION_WARMUP_ROUNDS = 10
+    
+    # ===== 新增：基于贡献度的加权聚合配置 =====
+    # ===== NEW: Contribution-Aware Aggregation Configuration =====
+    
+    # 聚合方式 / Aggregation method
+    # "fedavg": 传统FedAvg（基于样本数量）/ Traditional FedAvg (sample-based)
+    # "contribution": 基于贡献度的加权聚合 / Contribution-aware aggregation
+    AGGREGATION_METHOD = "contribution"
+    
+    # Scale参数：控制Softmax的温度（区分度）
+    # Scale parameter: Controls Softmax temperature (discrimination)
+    # 较大值(>10): 趋向"赢家通吃" / Larger values: "winner-takes-all"
+    # 较小值(~1): 更均衡的权重分配 / Smaller values: more balanced
+    # 建议范围: 1.0 - 10.0
+    AGGREGATION_SCALE = 5.0
+    
+    # Scale模式 / Scale mode
+    # "fixed": 使用固定的AGGREGATION_SCALE值 / Use fixed AGGREGATION_SCALE
+    # "dynamic": 动态调整为 1/std(contributions) / Dynamic: 1/std(contributions)
+    AGGREGATION_SCALE_MODE = "fixed"
+    
+    # 混合权重：结合样本数量和贡献度 / Hybrid weight: combine sample count and contribution
+    # final_weight = SAMPLE_WEIGHT_RATIO * sample_weight + (1-SAMPLE_WEIGHT_RATIO) * contribution_weight
+    # 0.0: 纯贡献度加权 / Pure contribution weighting
+    # 1.0: 纯样本数量加权（FedAvg）/ Pure sample weighting (FedAvg)
+    # 0.5: 混合 / Hybrid
+    SAMPLE_WEIGHT_RATIO = 0.0  # 默认使用纯贡献度加权
 
 # =====================================
 # 数据集配置 / Dataset Configuration
@@ -159,6 +189,15 @@ class ModelConfig:
         'bn': 0.0,     # BN层不稀疏化 / Don't sparsify BN layers
         'first': 0.5,  # 第一层权重 / First layer weight
         'last': 0.5    # 最后一层权重 / Last layer weight
+    }
+    
+    # 新增：模型选择配置 / NEW: Model selection configuration
+    # CIFAR-100使用更高级的模型 / Use advanced model for CIFAR-100
+    MODEL_TYPE = {
+        "mnist": "simple_cnn",
+        "fashion-mnist": "simple_cnn",
+        "cifar10": "cifar_cnn",
+        "cifar100": "resnet18"  # 使用ResNet18 / Use ResNet18
     }
 
 # =====================================

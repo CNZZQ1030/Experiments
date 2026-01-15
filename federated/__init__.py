@@ -2,6 +2,6 @@
 federated/__init__.py
 """
 from .client import FederatedClient
-from .server import FederatedServerWithSparsification
+from .server import FederatedServerWithGradientSparsification
 
-__all__ = ['FederatedClient', 'FederatedServerWithSparsification']
+__all__ = ['FederatedClient', 'FederatedServerWithGradientSparsification']
