@@ -1,457 +1,366 @@
 """
-incentive/sparsification_distributor.py
-稀疏化差异模型分发器 / Sparsification-based Differentiated Model Distributor
-
-实现基于贡献度的模型稀疏化策略 / Implements contribution-based model sparsification strategy
-高贡献客户端获得更完整的模型（低稀疏率）/ High contributors get more complete models (low sparsity)
-低贡献客户端获得更稀疏的模型（高稀疏率）/ Low contributors get sparser models (high sparsity)
+incentive/sparsification_distributor.py - 重构版本
+梯度稀疏化分发器 - 对聚合梯度进行差异化稀疏处理
+Gradient Sparsification Distributor - Differential Sparsification of Aggregated Gradients
 """
 
 import torch
-import torch.nn as nn
-import copy
 import numpy as np
-from typing import Dict, List, Tuple, Optional
-import math
+from typing import Dict, Tuple, List
+from collections import defaultdict
+import copy
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import IncentiveConfig
 
 
 class SparsificationDistributor:
     """
-    稀疏化模型分发器 / Sparsification Model Distributor
+    梯度稀疏化分发器
     
-    核心思想 / Core Idea:
-    - 根据客户端贡献度计算保留率 / Calculate keep ratio based on contribution
-    - 对全局模型进行稀疏化处理 / Apply sparsification to global model
-    - 高贡献客户端获得接近完整的模型 / High contributors get nearly complete model
-    - 低贡献客户端获得高度稀疏的模型 / Low contributors get highly sparse model
+    核心功能 / Core Functions:
+    1. 根据会员等级和贡献度计算稀疏率
+    2. 对全局聚合梯度进行差异化稀疏
+    3. 分发稀疏化梯度给不同客户端
+    
+    稀疏化公式 / Sparsification Formula:
+        keep_ratio_i = min_keep + (1 - min_keep) * (r_i)^λ
+        其中 r_i 是归一化排名，λ 控制曲线形状
     """
     
-    def __init__(self, 
-                 base_model: nn.Module,
-                 device: torch.device,
-                 sparsity_ranges: Dict[str, Tuple[float, float]] = None,
-                 min_keep_ratio: float = 0.1,
-                 lambda_coefficient: float = 2.0,
-                 sparsification_mode: str = "magnitude",
-                 layer_importance_weights: Dict[str, float] = None):
+    def __init__(self, device: torch.device):
         """
-        初始化稀疏化分发器 / Initialize sparsification distributor
+        初始化稀疏化分发器
         
         Args:
-            base_model: 基础模型 / Base model
-            device: 计算设备 / Computing device
-            sparsity_ranges: 各等级的稀疏率范围 / Sparsity ranges for each level
-            min_keep_ratio: 最低保留率 / Minimum keep ratio
-            lambda_coefficient: 调节系数λ / Adjustment coefficient λ
-            sparsification_mode: 稀疏化模式 / Sparsification mode
-            layer_importance_weights: 层重要性权重 / Layer importance weights
+            device: 计算设备
         """
-        self.base_model = copy.deepcopy(base_model).to(device)
         self.device = device
-        self.min_keep_ratio = min_keep_ratio
-        self.lambda_coefficient = lambda_coefficient
-        self.sparsification_mode = sparsification_mode
         
-        # 默认稀疏率范围 / Default sparsity ranges
-        if sparsity_ranges is None:
-            self.sparsity_ranges = {
-                'diamond': (0.0, 0.1),
-                'gold': (0.1, 0.3),
-                'silver': (0.3, 0.6),
-                'bronze': (0.6, 0.95)
-            }
-        else:
-            self.sparsity_ranges = sparsity_ranges
+        # 配置参数
+        self.sparsification_mode = IncentiveConfig.SPARSIFICATION_MODE
+        self.lambda_coef = IncentiveConfig.LAMBDA
+        self.min_keep_ratio = IncentiveConfig.MIN_KEEP_RATIO
+        self.max_keep_ratio = IncentiveConfig.MAX_KEEP_RATIO
+        self.level_sparsity_ranges = IncentiveConfig.LEVEL_SPARSITY_RANGES
         
-        # 层重要性权重 / Layer importance weights
-        if layer_importance_weights is None:
-            self.layer_importance_weights = {
-                'conv': 1.0,
-                'fc': 0.8,
-                'bn': 0.0,  # BN层不稀疏化 / Don't sparsify BN layers
-                'first': 0.5,
-                'last': 0.5
-            }
-        else:
-            self.layer_importance_weights = layer_importance_weights
+        # 统计信息
+        self.sparsification_stats = defaultdict(list)
         
-        # 统计信息 / Statistics
-        self.sparsification_stats = {}
-        
-        print(f"SparsificationDistributor initialized:")
-        print(f"  Mode: {sparsification_mode}")
-        print(f"  Min Keep Ratio: {min_keep_ratio}")
-        print(f"  Lambda: {lambda_coefficient}")
-        print(f"  Sparsity Ranges: {self.sparsity_ranges}")
+        print(f"✓ Gradient Sparsification Distributor initialized")
+        print(f"  Mode: {self.sparsification_mode}")
+        print(f"  Lambda: {self.lambda_coef}")
+        print(f"  Keep ratio range: [{self.min_keep_ratio}, {self.max_keep_ratio}]")
     
     def calculate_keep_ratio(self, 
-                           relative_contribution: float,
-                           membership_level: str) -> float:
+                            client_id: int,
+                            membership_level: str,
+                            contributions: Dict[int, float]) -> float:
         """
-        计算模型保留率 / Calculate model keep ratio
+        计算客户端的保留率（1 - 稀疏率）
         
-        公式 / Formula: α_i = Min_Keep + (1 - Min_Keep) × (r_i)^λ
+        基于会员等级和贡献度排名的双重控制
         
         Args:
-            relative_contribution: 相对贡献度 r_i ∈ [0,1] / Relative contribution
-            membership_level: 会员等级 / Membership level
-            
+            client_id: 客户端ID
+            membership_level: 会员等级
+            contributions: 所有客户端的贡献度
+        
         Returns:
-            保留率 α_i / Keep ratio
+            keep_ratio: 保留率 (0到1之间)
         """
-        # 基于公式计算基础保留率 / Calculate base keep ratio using formula
-        base_keep_ratio = self.min_keep_ratio + \
-                         (1 - self.min_keep_ratio) * \
-                         (relative_contribution ** self.lambda_coefficient)
+        # 获取等级对应的稀疏率范围
+        if membership_level not in self.level_sparsity_ranges:
+            membership_level = 'bronze'
         
-        # 根据会员等级调整范围 / Adjust range based on membership level
-        min_sparse, max_sparse = self.sparsity_ranges.get(membership_level, (0.6, 0.95))
+        min_sparsity, max_sparsity = self.level_sparsity_ranges[membership_level]
         
-        # 转换稀疏率到保留率 / Convert sparsity rate to keep ratio
-        max_keep = 1.0 - min_sparse
-        min_keep = 1.0 - max_sparse
-        
-        # 在等级范围内进行线性插值 / Linear interpolation within level range
-        # 确保保留率在该等级的合理范围内 / Ensure keep ratio is within reasonable range for the level
-        keep_ratio = min_keep + (max_keep - min_keep) * relative_contribution
-        
-        # 结合基础保留率和等级范围 / Combine base ratio and level range
-        final_keep_ratio = 0.5 * base_keep_ratio + 0.5 * keep_ratio
-        
-        # 确保在有效范围内 / Ensure within valid range
-        final_keep_ratio = max(self.min_keep_ratio, min(1.0, final_keep_ratio))
-        
-        return final_keep_ratio
-    
-    def magnitude_based_sparsification(self,
-                                      weights: torch.Tensor,
-                                      keep_ratio: float) -> torch.Tensor:
-        """
-        基于权重大小的稀疏化 / Magnitude-based sparsification
-        保留最大的keep_ratio比例的权重 / Keep the largest keep_ratio proportion of weights
-        
-        Args:
-            weights: 原始权重 / Original weights
-            keep_ratio: 保留率 / Keep ratio
+        # 计算贡献度排名（归一化到0-1）
+        if contributions and len(contributions) > 1:
+            sorted_clients = sorted(contributions.items(), key=lambda x: x[1], reverse=True)
+            rank_dict = {cid: idx for idx, (cid, _) in enumerate(sorted_clients)}
             
-        Returns:
-            稀疏化后的权重 / Sparsified weights
-        """
-        if keep_ratio >= 1.0:
-            return weights
-        
-        # 展平权重 / Flatten weights
-        weights_flat = weights.flatten()
-        num_params = weights_flat.numel()
-        
-        # 计算需要保留的参数数量 / Calculate number of parameters to keep
-        num_keep = max(1, int(num_params * keep_ratio))
-        
-        # 获取权重绝对值 / Get absolute values
-        abs_weights = torch.abs(weights_flat)
-        
-        # 找到阈值 / Find threshold
-        threshold = torch.topk(abs_weights, num_keep, largest=True, sorted=False)[0].min()
-        
-        # 创建掩码 / Create mask
-        mask = torch.abs(weights) >= threshold
-        
-        # 应用掩码 / Apply mask
-        sparse_weights = weights * mask.float()
-        
-        return sparse_weights
-    
-    def random_sparsification(self,
-                            weights: torch.Tensor,
-                            keep_ratio: float) -> torch.Tensor:
-        """
-        随机稀疏化 / Random sparsification
-        随机保留keep_ratio比例的权重 / Randomly keep keep_ratio proportion of weights
-        
-        Args:
-            weights: 原始权重 / Original weights
-            keep_ratio: 保留率 / Keep ratio
-            
-        Returns:
-            稀疏化后的权重 / Sparsified weights
-        """
-        if keep_ratio >= 1.0:
-            return weights
-        
-        # 创建随机掩码 / Create random mask
-        mask = torch.rand_like(weights) < keep_ratio
-        
-        # 应用掩码 / Apply mask
-        sparse_weights = weights * mask.float()
-        
-        return sparse_weights
-    
-    def structured_sparsification(self,
-                                weights: torch.Tensor,
-                                keep_ratio: float,
-                                dim: int = 0) -> torch.Tensor:
-        """
-        结构化稀疏化 / Structured sparsification
-        按维度（通道/滤波器）进行稀疏化 / Sparsify by dimension (channel/filter)
-        
-        Args:
-            weights: 原始权重 / Original weights
-            keep_ratio: 保留率 / Keep ratio
-            dim: 稀疏化维度 / Dimension to sparsify
-            
-        Returns:
-            稀疏化后的权重 / Sparsified weights
-        """
-        if keep_ratio >= 1.0:
-            return weights
-        
-        # 对于卷积层权重 [out_channels, in_channels, H, W]
-        # For conv weights [out_channels, in_channels, H, W]
-        if len(weights.shape) == 4:
-            # 计算每个滤波器的L2范数 / Calculate L2 norm for each filter
-            norms = torch.norm(weights.view(weights.shape[0], -1), dim=1)
-            num_filters = weights.shape[0]
-            num_keep = max(1, int(num_filters * keep_ratio))
-            
-            # 找到要保留的滤波器 / Find filters to keep
-            _, keep_indices = torch.topk(norms, num_keep, largest=True)
-            
-            # 创建掩码 / Create mask
-            mask = torch.zeros_like(weights)
-            mask[keep_indices] = 1.0
-            
-            return weights * mask
-        
-        # 对于全连接层权重 [out_features, in_features]
-        # For FC weights [out_features, in_features]
-        elif len(weights.shape) == 2:
-            # 计算每行的L2范数 / Calculate L2 norm for each row
-            norms = torch.norm(weights, dim=1)
-            num_rows = weights.shape[0]
-            num_keep = max(1, int(num_rows * keep_ratio))
-            
-            # 找到要保留的行 / Find rows to keep
-            _, keep_indices = torch.topk(norms, num_keep, largest=True)
-            
-            # 创建掩码 / Create mask
-            mask = torch.zeros_like(weights)
-            mask[keep_indices, :] = 1.0
-            
-            return weights * mask
-        
-        # 默认使用magnitude方法 / Default to magnitude method
-        return self.magnitude_based_sparsification(weights, keep_ratio)
-    
-    def apply_sparsification_to_model(self,
-                                     model_weights: Dict[str, torch.Tensor],
-                                     keep_ratio: float) -> Dict[str, torch.Tensor]:
-        """
-        对整个模型应用稀疏化 / Apply sparsification to entire model
-        
-        Args:
-            model_weights: 模型权重字典 / Model weights dictionary
-            keep_ratio: 保留率 / Keep ratio
-            
-        Returns:
-            稀疏化后的模型权重 / Sparsified model weights
-        """
-        sparse_weights = {}
-        total_params = 0
-        kept_params = 0
-        
-        for name, weight in model_weights.items():
-            # 跳过批归一化层和偏置 / Skip batch normalization and bias
-            if 'bn' in name.lower() or 'bias' in name or 'running' in name or 'num_batches' in name:
-                sparse_weights[name] = weight.clone()
-                continue
-            
-            # 根据层名称调整保留率 / Adjust keep ratio based on layer name
-            layer_keep_ratio = keep_ratio
-            
-            # 第一层和最后一层特殊处理 / Special handling for first and last layers
-            layer_names = list(model_weights.keys())
-            weight_layers = [n for n in layer_names if 'weight' in n and 'bn' not in n.lower()]
-            
-            if weight_layers and name == weight_layers[0]:
-                # 第一层：减少稀疏化 / First layer: reduce sparsification
-                layer_keep_ratio = keep_ratio + (1 - keep_ratio) * 0.5
-            elif weight_layers and name == weight_layers[-1]:
-                # 最后一层：减少稀疏化 / Last layer: reduce sparsification
-                layer_keep_ratio = keep_ratio + (1 - keep_ratio) * 0.5
-            
-            # 应用稀疏化 / Apply sparsification
-            if self.sparsification_mode == "magnitude":
-                sparse_weight = self.magnitude_based_sparsification(weight, layer_keep_ratio)
-            elif self.sparsification_mode == "random":
-                sparse_weight = self.random_sparsification(weight, layer_keep_ratio)
-            elif self.sparsification_mode == "structured":
-                sparse_weight = self.structured_sparsification(weight, layer_keep_ratio)
+            if client_id in rank_dict:
+                rank = rank_dict[client_id]
+                normalized_rank = 1.0 - (rank / (len(contributions) - 1))  # 高贡献者 → 1
             else:
-                sparse_weight = weight.clone()
-            
-            sparse_weights[name] = sparse_weight
-            
-            # 统计稀疏化情况 / Statistics
-            total_params += weight.numel()
-            kept_params += (sparse_weight != 0).sum().item()
-        
-        # 计算实际稀疏率 / Calculate actual sparsity
-        actual_keep_ratio = kept_params / total_params if total_params > 0 else 1.0
-        
-        return sparse_weights, actual_keep_ratio
-    
-    def create_sparsified_model(self,
-                              client_id: int,
-                              membership_level: str,
-                              relative_contribution: float,
-                              global_model_weights: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """
-        为客户端创建稀疏化模型 / Create sparsified model for client
-        
-        Args:
-            client_id: 客户端ID / Client ID
-            membership_level: 会员等级 / Membership level
-            relative_contribution: 相对贡献度 [0,1] / Relative contribution
-            global_model_weights: 全局模型权重 / Global model weights
-            
-        Returns:
-            稀疏化后的模型权重 / Sparsified model weights
-        """
-        # 计算保留率 / Calculate keep ratio
-        keep_ratio = self.calculate_keep_ratio(relative_contribution, membership_level)
-        
-        # 应用稀疏化 / Apply sparsification
-        sparse_weights, actual_keep_ratio = self.apply_sparsification_to_model(
-            global_model_weights, keep_ratio
-        )
-        
-        # 记录统计信息 / Record statistics
-        self.sparsification_stats[client_id] = {
-            'membership_level': membership_level,
-            'relative_contribution': relative_contribution,
-            'target_keep_ratio': keep_ratio,
-            'actual_keep_ratio': actual_keep_ratio,
-            'sparsity_rate': 1.0 - actual_keep_ratio
-        }
-        
-        return sparse_weights
-    
-    def distribute_all_sparsified_models(self,
-                                        client_levels: Dict[int, str],
-                                        client_contributions: Dict[int, float],
-                                        global_model_weights: Dict[str, torch.Tensor]) -> Dict[int, Dict[str, torch.Tensor]]:
-        """
-        为所有客户端分发稀疏化模型 / Distribute sparsified models to all clients
-        
-        Args:
-            client_levels: 客户端等级 {client_id: level}
-            client_contributions: 客户端贡献度 {client_id: contribution}
-            global_model_weights: 全局模型权重 / Global model weights
-            
-        Returns:
-            稀疏化模型字典 {client_id: sparsified_weights}
-        """
-        sparsified_models = {}
-        
-        # 计算相对贡献度（归一化到[0,1]）/ Calculate relative contributions (normalized to [0,1])
-        if client_contributions:
-            min_contrib = min(client_contributions.values())
-            max_contrib = max(client_contributions.values())
-            contrib_range = max_contrib - min_contrib
-            
-            if contrib_range > 0:
-                relative_contributions = {
-                    cid: (contrib - min_contrib) / contrib_range
-                    for cid, contrib in client_contributions.items()
-                }
-            else:
-                # 所有贡献度相同 / All contributions are the same
-                relative_contributions = {cid: 0.5 for cid in client_contributions.keys()}
+                normalized_rank = 0.5
         else:
-            relative_contributions = {}
+            normalized_rank = 0.5
         
-        # 为每个客户端创建稀疏化模型 / Create sparsified model for each client
-        for client_id in client_levels.keys():
-            level = client_levels.get(client_id, 'bronze')
-            relative_contrib = relative_contributions.get(client_id, 0.0)
-            
-            sparsified_model = self.create_sparsified_model(
-                client_id=client_id,
-                membership_level=level,
-                relative_contribution=relative_contrib,
-                global_model_weights=global_model_weights
-            )
-            
-            sparsified_models[client_id] = sparsified_model
+        # 使用幂律函数计算保留率
+        # keep_ratio = min_keep + (1 - min_keep) * (normalized_rank)^λ
+        rank_factor = np.power(normalized_rank, self.lambda_coef)
         
-        return sparsified_models
+        # 在等级范围内调整
+        level_min_keep = 1.0 - max_sparsity
+        level_max_keep = 1.0 - min_sparsity
+        
+        keep_ratio = level_min_keep + (level_max_keep - level_min_keep) * rank_factor
+        
+        # 确保在全局范围内
+        keep_ratio = np.clip(keep_ratio, self.min_keep_ratio, self.max_keep_ratio)
+        
+        return float(keep_ratio)
+    
+    def sparsify_gradient_magnitude(self, 
+                                    gradient: Dict[str, torch.Tensor],
+                                    keep_ratio: float) -> Dict[str, torch.Tensor]:
+        """
+        基于梯度幅度的稀疏化
+        
+        保留绝对值最大的 keep_ratio 比例的梯度分量
+        
+        Args:
+            gradient: 梯度字典
+            keep_ratio: 保留率
+        
+        Returns:
+            sparse_gradient: 稀疏化后的梯度
+        """
+        sparse_gradient = {}
+        
+        for name, grad_tensor in gradient.items():
+            if keep_ratio >= 1.0:
+                # 完全保留
+                sparse_gradient[name] = grad_tensor.clone()
+            elif keep_ratio <= 0.0:
+                # 完全置零
+                sparse_gradient[name] = torch.zeros_like(grad_tensor)
+            else:
+                # 部分保留
+                flat_grad = grad_tensor.flatten()
+                num_params = flat_grad.numel()
+                num_keep = max(1, int(num_params * keep_ratio))
+                
+                # 找到阈值
+                abs_grad = torch.abs(flat_grad)
+                threshold = torch.topk(abs_grad, num_keep, largest=True).values[-1]
+                
+                # 创建mask
+                mask = (abs_grad >= threshold).float()
+                
+                # 应用mask
+                sparse_flat = flat_grad * mask
+                sparse_gradient[name] = sparse_flat.reshape(grad_tensor.shape)
+        
+        return sparse_gradient
+    
+    def sparsify_gradient_random(self,
+                                gradient: Dict[str, torch.Tensor],
+                                keep_ratio: float) -> Dict[str, torch.Tensor]:
+        """
+        随机稀疏化梯度
+        
+        随机保留 keep_ratio 比例的梯度分量
+        
+        Args:
+            gradient: 梯度字典
+            keep_ratio: 保留率
+        
+        Returns:
+            sparse_gradient: 稀疏化后的梯度
+        """
+        sparse_gradient = {}
+        
+        for name, grad_tensor in gradient.items():
+            if keep_ratio >= 1.0:
+                sparse_gradient[name] = grad_tensor.clone()
+            elif keep_ratio <= 0.0:
+                sparse_gradient[name] = torch.zeros_like(grad_tensor)
+            else:
+                # 随机mask
+                mask = (torch.rand_like(grad_tensor) < keep_ratio).float()
+                sparse_gradient[name] = grad_tensor * mask
+        
+        return sparse_gradient
+    
+    def sparsify_gradient_structured(self,
+                                    gradient: Dict[str, torch.Tensor],
+                                    keep_ratio: float) -> Dict[str, torch.Tensor]:
+        """
+        结构化稀疏化梯度（按通道/滤波器）
+        
+        对卷积层，按滤波器维度稀疏化
+        对全连接层，按神经元维度稀疏化
+        
+        Args:
+            gradient: 梯度字典
+            keep_ratio: 保留率
+        
+        Returns:
+            sparse_gradient: 稀疏化后的梯度
+        """
+        sparse_gradient = {}
+        
+        for name, grad_tensor in gradient.items():
+            if keep_ratio >= 1.0:
+                sparse_gradient[name] = grad_tensor.clone()
+            elif keep_ratio <= 0.0:
+                sparse_gradient[name] = torch.zeros_like(grad_tensor)
+            else:
+                # 根据张量维度决定稀疏化策略
+                if len(grad_tensor.shape) == 4:  # 卷积层 [out_ch, in_ch, h, w]
+                    # 按输出通道稀疏化
+                    num_filters = grad_tensor.shape[0]
+                    num_keep = max(1, int(num_filters * keep_ratio))
+                    
+                    # 计算每个滤波器的L2范数
+                    filter_norms = torch.norm(
+                        grad_tensor.reshape(num_filters, -1), 
+                        dim=1
+                    )
+                    
+                    # 选择top-k滤波器
+                    _, top_indices = torch.topk(filter_norms, num_keep, largest=True)
+                    
+                    # 创建mask
+                    mask = torch.zeros_like(grad_tensor)
+                    mask[top_indices, :, :, :] = 1.0
+                    
+                    sparse_gradient[name] = grad_tensor * mask
+                
+                elif len(grad_tensor.shape) == 2:  # 全连接层 [out, in]
+                    # 按输出神经元稀疏化
+                    num_neurons = grad_tensor.shape[0]
+                    num_keep = max(1, int(num_neurons * keep_ratio))
+                    
+                    # 计算每个神经元的L2范数
+                    neuron_norms = torch.norm(grad_tensor, dim=1)
+                    
+                    # 选择top-k神经元
+                    _, top_indices = torch.topk(neuron_norms, num_keep, largest=True)
+                    
+                    # 创建mask
+                    mask = torch.zeros_like(grad_tensor)
+                    mask[top_indices, :] = 1.0
+                    
+                    sparse_gradient[name] = grad_tensor * mask
+                
+                else:
+                    # 其他形状（如BN参数），使用magnitude稀疏化
+                    sparse_gradient[name] = self.sparsify_gradient_magnitude(
+                        {name: grad_tensor}, keep_ratio
+                    )[name]
+        
+        return sparse_gradient
+    
+    def sparsify_gradient(self,
+                         gradient: Dict[str, torch.Tensor],
+                         keep_ratio: float) -> Dict[str, torch.Tensor]:
+        """
+        根据配置的模式稀疏化梯度
+        
+        Args:
+            gradient: 梯度字典
+            keep_ratio: 保留率
+        
+        Returns:
+            sparse_gradient: 稀疏化后的梯度
+        """
+        if self.sparsification_mode == 'magnitude':
+            return self.sparsify_gradient_magnitude(gradient, keep_ratio)
+        elif self.sparsification_mode == 'random':
+            return self.sparsify_gradient_random(gradient, keep_ratio)
+        elif self.sparsification_mode == 'structured':
+            return self.sparsify_gradient_structured(gradient, keep_ratio)
+        else:
+            raise ValueError(f"Unknown sparsification mode: {self.sparsification_mode}")
+    
+    def distribute_sparsified_gradients(self,
+                                       global_gradient: Dict[str, torch.Tensor],
+                                       membership_levels: Dict[int, str],
+                                       contributions: Dict[int, float]) -> Dict[int, Dict[str, torch.Tensor]]:
+        """
+        分发差异化稀疏的梯度给客户端
+        
+        核心流程 / Core Workflow:
+        1. 计算每个客户端的保留率
+        2. 对全局梯度进行差异化稀疏
+        3. 返回每个客户端的稀疏梯度
+        
+        Args:
+            global_gradient: 全局聚合梯度
+            membership_levels: 客户端会员等级
+            contributions: 客户端贡献度
+        
+        Returns:
+            Dict[client_id, sparse_gradient]: 每个客户端的稀疏梯度
+        """
+        sparsified_gradients = {}
+        
+        # 统计信息
+        level_stats = defaultdict(lambda: {'keep_ratios': [], 'count': 0})
+        
+        for client_id, level in membership_levels.items():
+            # 计算保留率
+            keep_ratio = self.calculate_keep_ratio(client_id, level, contributions)
+            
+            # 稀疏化梯度
+            sparse_gradient = self.sparsify_gradient(global_gradient, keep_ratio)
+            
+            sparsified_gradients[client_id] = sparse_gradient
+            
+            # 统计
+            sparsity_rate = 1.0 - keep_ratio
+            level_stats[level]['keep_ratios'].append(keep_ratio)
+            level_stats[level]['count'] += 1
+            
+            self.sparsification_stats['keep_ratios'].append(keep_ratio)
+            self.sparsification_stats['sparsity_rates'].append(sparsity_rate)
+        
+        # 记录本轮统计
+        self.sparsification_stats['round_level_stats'] = level_stats
+        
+        return sparsified_gradients
     
     def get_sparsification_statistics(self) -> Dict:
-        """
-        获取稀疏化统计信息 / Get sparsification statistics
-        
-        Returns:
-            统计信息 / Statistics
-        """
-        if not self.sparsification_stats:
+        """获取稀疏化统计信息"""
+        if not self.sparsification_stats.get('keep_ratios'):
             return {}
         
-        stats_by_level = {'diamond': [], 'gold': [], 'silver': [], 'bronze': []}
+        level_stats = self.sparsification_stats.get('round_level_stats', {})
         
-        for client_stats in self.sparsification_stats.values():
-            level = client_stats['membership_level']
-            if level in stats_by_level:
-                stats_by_level[level].append(client_stats)
+        stats = {
+            'overall': {
+                'avg_keep_ratio': float(np.mean(self.sparsification_stats['keep_ratios'])),
+                'avg_sparsity_rate': float(np.mean(self.sparsification_stats['sparsity_rates'])),
+                'min_keep_ratio': float(np.min(self.sparsification_stats['keep_ratios'])),
+                'max_keep_ratio': float(np.max(self.sparsification_stats['keep_ratios']))
+            },
+            'by_level': {}
+        }
         
-        summary = {}
-        for level, level_stats in stats_by_level.items():
-            if level_stats:
-                keep_ratios = [s['actual_keep_ratio'] for s in level_stats]
-                sparsity_rates = [s['sparsity_rate'] for s in level_stats]
-                summary[level] = {
-                    'count': len(level_stats),
-                    'avg_keep_ratio': np.mean(keep_ratios),
-                    'std_keep_ratio': np.std(keep_ratios),
-                    'avg_sparsity_rate': np.mean(sparsity_rates),
-                    'std_sparsity_rate': np.std(sparsity_rates),
-                    'expected_range': self.sparsity_ranges[level]
+        for level, level_data in level_stats.items():
+            if level_data['keep_ratios']:
+                stats['by_level'][level] = {
+                    'avg_keep_ratio': float(np.mean(level_data['keep_ratios'])),
+                    'avg_sparsity_rate': 1.0 - float(np.mean(level_data['keep_ratios'])),
+                    'count': level_data['count']
                 }
         
-        return {
-            'by_level': summary,
-            'total_clients': len(self.sparsification_stats),
-            'mode': self.sparsification_mode,
-            'lambda': self.lambda_coefficient,
-            'min_keep_ratio': self.min_keep_ratio
-        }
+        return stats
     
-    def print_sparsification_summary(self):
-        """打印稀疏化摘要 / Print sparsification summary"""
-        stats = self.get_sparsification_statistics()
+    def calculate_actual_sparsity(self, 
+                                 sparse_gradient: Dict[str, torch.Tensor]) -> float:
+        """
+        计算实际的稀疏率（梯度中零元素的比例）
         
-        if not stats:
-            print("No sparsification statistics available.")
-            return
+        Args:
+            sparse_gradient: 稀疏梯度
         
-        print(f"\n{'='*70}")
-        print(f"Sparsification Summary")
-        print(f"{'='*70}")
-        print(f"Mode: {stats['mode']}")
-        print(f"Lambda (λ): {stats['lambda']}")
-        print(f"Min Keep Ratio: {stats['min_keep_ratio']}")
-        print(f"Total Clients: {stats['total_clients']}")
+        Returns:
+            actual_sparsity: 实际稀疏率
+        """
+        total_params = 0
+        zero_params = 0
         
-        print(f"\nStatistics by Membership Level:")
-        print(f"{'Level':<10} {'Count':<8} {'Avg Keep':<10} {'Avg Sparse':<12} {'Expected Range'}")
-        print(f"{'-'*70}")
+        for grad_tensor in sparse_gradient.values():
+            total_params += grad_tensor.numel()
+            zero_params += (grad_tensor == 0).sum().item()
         
-        for level in ['diamond', 'gold', 'silver', 'bronze']:
-            if level in stats['by_level']:
-                level_stats = stats['by_level'][level]
-                expected_min, expected_max = level_stats['expected_range']
-                print(f"{level.capitalize():<10} {level_stats['count']:<8} "
-                      f"{level_stats['avg_keep_ratio']:.3f}±{level_stats['std_keep_ratio']:.3f}  "
-                      f"{level_stats['avg_sparsity_rate']:.3f}±{level_stats['std_sparsity_rate']:.3f}  "
-                      f"[{expected_min:.2f}-{expected_max:.2f}]")
-        
-        print(f"{'='*70}")
+        actual_sparsity = zero_params / total_params if total_params > 0 else 0.0
+        return actual_sparsity
