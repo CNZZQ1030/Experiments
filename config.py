@@ -1,9 +1,14 @@
 """
-config.py - 基于稀疏化的差异化模型配置（重构版）
-Configuration for Sparsification-based Differentiated Model Distribution (Refactored)
+config.py - 层级约束动态梯度奖励配置（重构版）
+Configuration for Tier-Constrained Dynamic Gradient Reward (Refactored)
 
-新增：基于贡献度的加权聚合配置
-Added: Contribution-Aware Aggregation Configuration
+基于NeurIPS 2021论文"Gradient-Driven Rewards to Guarantee Fairness in Collaborative Machine Learning"
+Based on NeurIPS 2021 paper "Gradient-Driven Rewards to Guarantee Fairness in Collaborative Machine Learning"
+
+核心改进 / Core Improvements:
+1. 层级作为稀疏率的上下界 / Tiers as bounds for sparsification rates
+2. 组内插值实现连续映射 / Intra-tier interpolation for continuous mapping
+3. 大幅降低低贡献客户端的参数保留率 / Significantly reduce keep ratio for low-contribution clients
 """
 
 import torch
@@ -44,92 +49,116 @@ class FederatedConfig:
     WEIGHT_DECAY = 1e-4
 
 # =====================================
-# 激励机制配置 - 稀疏化版本 / Incentive Configuration - Sparsification Version
+# 激励机制配置 - 层级约束动态梯度奖励版本
+# Incentive Configuration - Tier-Constrained Dynamic Gradient Reward Version
 # =====================================
 
 class IncentiveConfig:
-    """激励机制参数配置 - 基于稀疏化的差异化
-    Incentive Mechanism - Sparsification-based Differentiation"""
+    """
+    激励机制参数配置 - 层级约束动态梯度奖励
+    Incentive Mechanism - Tier-Constrained Dynamic Gradient Reward
+    
+    核心思想 / Core Concept:
+    - 不给每个等级一个"固定"的稀疏率
+    - 将等级作为稀疏率的上下界（Bounds）
+    - 在界限内根据CGSV分数进行连续且敏感的映射
+    
+    - Don't give each tier a "fixed" sparsification rate
+    - Use tiers as bounds for sparsification rates
+    - Map continuously and sensitively within bounds based on CGSV scores
+    """
     
     # ===== CGSV配置 / CGSV Configuration =====
     CGSV_EPSILON = 1e-10
     
     # ===== 时间片配置 / Time Slice Configuration =====
     TIME_SLICE_TYPE = "rounds"
-    ROUNDS_PER_SLICE = 5  # τ: 每个时间片包含的轮次数
-    POINTS_VALIDITY_SLICES = 2  # W: 积分有效期（时间片数）
+    ROUNDS_PER_SLICE = 5  # τ: 每个时间片包含的轮次数 / Rounds per time slice
+    POINTS_VALIDITY_SLICES = 2  # W: 积分有效期（时间片数）/ Points validity period
     
     # ===== 会员等级配置（基于相对排名）/ Membership Level Configuration =====
-    # Diamond 10%, Gold 30%, Silver 40%, Bronze 20%
+    # 使用三级制：Gold, Silver, Bronze
+    # Using three-tier system: Gold, Silver, Bronze
+    # percentile值表示该等级需要的最低排名百分位
+    # Percentile value indicates the minimum ranking percentile for that level
     LEVEL_PERCENTILES = {
-        'diamond': 0.90,  # Top 10%
-        'gold': 0.60,     # Top 40%
-        'silver': 0.20,   # Top 80%
-        'bronze': 0.00    # Remaining 20%
+        'gold': 0.80,     # Top 20% -> percentile >= 0.80
+        'silver': 0.50,   # Next 30% -> 0.50 <= percentile < 0.80
+        'bronze': 0.00    # Bottom 50% -> percentile < 0.50
     }
     
-    # ===== 稀疏化配置 / Sparsification Configuration =====
-    # 基础稀疏率范围 / Base sparsity rate ranges
-    # sparsity_rate: 被置零的参数比例 / Proportion of parameters set to zero
-    LEVEL_SPARSITY_RANGES = {
-        'diamond': (0.0, 0.1),    # 稀疏率 0-10% (保留90-100%参数)
-        'gold': (0.1, 0.3),       # 稀疏率 10-30% (保留70-90%参数)
-        'silver': (0.3, 0.6),     # 稀疏率 30-60% (保留40-70%参数)
-        'bronze': (0.6, 0.95)     # 稀疏率 60-95% (保留5-40%参数)
+    # ===== 核心改进：层级约束的稀疏率范围 =====
+    # ===== Core Improvement: Tier-Constrained Sparsification Rate Ranges =====
+    # 
+    # 关键改变 / Key Changes:
+    # 1. Bronze等级的下限大幅降低到0.1（只保留10%参数）
+    # 2. 使用保留率(keep_ratio)而非稀疏率(sparsity_rate)
+    # 3. 组内使用线性插值而非固定值
+    #
+    # keep_ratio范围：[lower_bound, upper_bound]
+    # keep_ratio range: [lower_bound, upper_bound]
+    TIER_KEEP_RATIO_RANGES = {
+        'gold': (0.80, 1.0),    # 高贡献：保留80%-100%参数 / High contribution: keep 80%-100%
+        'silver': (0.50, 0.80), # 中贡献：保留50%-80%参数 / Medium contribution: keep 50%-80%
+        'bronze': (0.10, 0.50)  # 低贡献：保留10%-50%参数 / Low contribution: keep 10%-50%
     }
     
-    # 保留率计算参数 / Keep ratio calculation parameters
-    MIN_KEEP_RATIO = 0.1  # 最低保留率 10% / Minimum keep ratio
-    MAX_KEEP_RATIO = 1.0  # 最高保留率 100% / Maximum keep ratio
+    # 备选配置：更激进的差异化（用于实验）
+    # Alternative config: More aggressive differentiation (for experiments)
+    TIER_KEEP_RATIO_RANGES_AGGRESSIVE = {
+        'gold': (0.90, 1.0),    # 保留90%-100% / Keep 90%-100%
+        'silver': (0.60, 0.90), # 保留60%-90% / Keep 60%-90%
+        'bronze': (0.10, 0.60)  # 保留10%-60% / Keep 10%-60%
+    }
     
-    # 调节系数 λ (控制曲线形状) / Adjustment coefficient λ
-    # λ > 1: 凸函数，高贡献者优势更明显 / Convex function, advantage for high contributors
-    # λ = 1: 线性关系 / Linear relationship
-    # λ < 1: 凹函数，更均衡 / Concave function, more balanced
-    LAMBDA = 2.0
+    # 备选配置：更温和的差异化
+    # Alternative config: More moderate differentiation
+    TIER_KEEP_RATIO_RANGES_MODERATE = {
+        'gold': (0.70, 1.0),    # 保留70%-100% / Keep 70%-100%
+        'silver': (0.40, 0.70), # 保留40%-70% / Keep 40%-70%
+        'bronze': (0.20, 0.40)  # 保留20%-40% / Keep 20%-40%
+    }
     
-    # 稀疏化模式 / Sparsification mode
-    # "magnitude": 基于权重大小的稀疏化 / Magnitude-based pruning
+    # ===== 全局保留率限制 / Global Keep Ratio Limits =====
+    MIN_KEEP_RATIO = 0.05  # 绝对最低保留率5% / Absolute minimum keep ratio
+    MAX_KEEP_RATIO = 1.0   # 最高保留率100% / Maximum keep ratio
+    
+    # ===== 稀疏化模式 / Sparsification Mode =====
+    # "magnitude": 基于权重大小的稀疏化（推荐）/ Magnitude-based pruning (recommended)
     # "random": 随机稀疏化 / Random pruning
     # "structured": 结构化稀疏化（按通道/层）/ Structured pruning
     SPARSIFICATION_MODE = "magnitude"
     
-    # 结构化稀疏化粒度 / Structured sparsification granularity
-    # "filter": 按卷积核稀疏化 / Filter-wise pruning
-    # "channel": 按通道稀疏化 / Channel-wise pruning
-    # "layer": 按层稀疏化 / Layer-wise pruning
-    STRUCTURED_GRANULARITY = "filter"
+    # ===== 组内插值配置 / Intra-Tier Interpolation Configuration =====
+    # 插值方法 / Interpolation method
+    # "linear": 线性插值 / Linear interpolation
+    # "power": 幂律插值（可调节曲线形状）/ Power-law interpolation
+    INTERPOLATION_METHOD = "linear"
     
-    # 是否使用渐进式稀疏化 / Progressive sparsification
-    PROGRESSIVE_SPARSIFICATION = False
-    SPARSIFICATION_WARMUP_ROUNDS = 10
+    # 幂律插值的指数（仅当INTERPOLATION_METHOD="power"时有效）
+    # Exponent for power-law interpolation (only effective when INTERPOLATION_METHOD="power")
+    # λ > 1: 凸函数，高贡献者优势更明显 / Convex function, advantage for high contributors
+    # λ = 1: 线性关系 / Linear relationship
+    # λ < 1: 凹函数，更均衡 / Concave function, more balanced
+    INTERPOLATION_LAMBDA = 1.0
     
-    # ===== 新增：基于贡献度的加权聚合配置 =====
-    # ===== NEW: Contribution-Aware Aggregation Configuration =====
+    # ===== 移动平均配置（参考论文公式4）=====
+    # ===== Moving Average Configuration (Reference: Paper Equation 4) =====
+    # r_{i,t} = α * r_{i,t-1} + (1-α) * ψ_{i,t}
+    MOVING_AVERAGE_ALPHA = 0.95
     
-    # 聚合方式 / Aggregation method
+    # ===== 聚合方式配置 =====
+    # ===== Aggregation Method Configuration =====
     # "fedavg": 传统FedAvg（基于样本数量）/ Traditional FedAvg (sample-based)
     # "contribution": 基于贡献度的加权聚合 / Contribution-aware aggregation
     AGGREGATION_METHOD = "contribution"
     
     # Scale参数：控制Softmax的温度（区分度）
     # Scale parameter: Controls Softmax temperature (discrimination)
-    # 较大值(>10): 趋向"赢家通吃" / Larger values: "winner-takes-all"
-    # 较小值(~1): 更均衡的权重分配 / Smaller values: more balanced
-    # 建议范围: 1.0 - 10.0
     AGGREGATION_SCALE = 5.0
     
-    # Scale模式 / Scale mode
-    # "fixed": 使用固定的AGGREGATION_SCALE值 / Use fixed AGGREGATION_SCALE
-    # "dynamic": 动态调整为 1/std(contributions) / Dynamic: 1/std(contributions)
-    AGGREGATION_SCALE_MODE = "fixed"
-    
-    # 混合权重：结合样本数量和贡献度 / Hybrid weight: combine sample count and contribution
-    # final_weight = SAMPLE_WEIGHT_RATIO * sample_weight + (1-SAMPLE_WEIGHT_RATIO) * contribution_weight
-    # 0.0: 纯贡献度加权 / Pure contribution weighting
-    # 1.0: 纯样本数量加权（FedAvg）/ Pure sample weighting (FedAvg)
-    # 0.5: 混合 / Hybrid
-    SAMPLE_WEIGHT_RATIO = 0.0  # 默认使用纯贡献度加权
+    # ===== 调试和日志配置 / Debug and Logging Configuration =====
+    VERBOSE_SPARSIFICATION = True  # 是否打印详细的稀疏化信息 / Print detailed sparsification info
 
 # =====================================
 # 数据集配置 / Dataset Configuration
@@ -181,8 +210,8 @@ class ModelConfig:
     CNN_KERNEL_SIZE = 3
     CNN_DROPOUT = 0.5
     
-    # 稀疏化相关配置 / Sparsification-related configuration
-    # 不同层的稀疏化敏感度权重 / Layer sensitivity weights for sparsification
+    # 不同层的稀疏化敏感度权重（可选）
+    # Layer sensitivity weights for sparsification (optional)
     LAYER_IMPORTANCE_WEIGHTS = {
         'conv': 1.0,   # 卷积层权重 / Convolution layer weight
         'fc': 0.8,     # 全连接层权重 / Fully connected layer weight
@@ -191,13 +220,12 @@ class ModelConfig:
         'last': 0.5    # 最后一层权重 / Last layer weight
     }
     
-    # 新增：模型选择配置 / NEW: Model selection configuration
-    # CIFAR-100使用更高级的模型 / Use advanced model for CIFAR-100
+    # 模型选择配置 / Model selection configuration
     MODEL_TYPE = {
         "mnist": "simple_cnn",
         "fashion-mnist": "simple_cnn",
         "cifar10": "cifar_cnn",
-        "cifar100": "resnet18"  # 使用ResNet18 / Use ResNet18
+        "cifar100": "resnet18"
     }
 
 # =====================================
@@ -207,7 +235,7 @@ class ModelConfig:
 class ExperimentConfig:
     """实验参数配置 / Experiment Parameters"""
     
-    EXPERIMENT_NAME = f"FL_Sparsification_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    EXPERIMENT_NAME = f"FL_TierConstrainedGradient_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     EVAL_FREQUENCY = 5
     SAVE_FREQUENCY = 10
     LOG_LEVEL = "INFO"
