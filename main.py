@@ -161,21 +161,39 @@ class TierConstrainedFederatedLearning:
         # 2. 模型创建 / Model creation
         print("  [2/6] Creating model / 创建模型...")
         num_classes = DatasetConfig.NUM_CLASSES[self.args.dataset]
-        input_channels = DatasetConfig.INPUT_SHAPE[self.args.dataset][0]
+    
+        # 判断是否为文本数据集 / Check if it's a text dataset
+        if DatasetConfig.is_text_dataset(self.args.dataset):
+            # ===== 文本数据集处理 / Text dataset handling =====
+            vocab_size = self.data_loader.get_vocab_size()
+            text_config = DatasetConfig.get_text_config(self.args.dataset)
         
-        self.model = ModelFactory.create_model(
-            self.args.dataset,
-            num_classes=num_classes,
-            input_channels=input_channels
-        )
+            # 创建文本模型 / Create text model
+            self.model = ModelFactory.create_model(
+                self.args.dataset,
+                num_classes=num_classes,
+                vocab_size=vocab_size,
+                **text_config
+            )
+            print(f"     Text model created with vocab_size={vocab_size}")
+        else:
+            # ===== 图像数据集处理 / Image dataset handling =====
+            input_channels = DatasetConfig.INPUT_SHAPE[self.args.dataset][0]
         
+            # 创建图像模型 / Create image model
+            self.model = ModelFactory.create_model(
+                self.args.dataset,
+                num_classes=num_classes,
+                input_channels=input_channels
+            )
+    
         # 打印模型信息 / Print model info
         total_params = sum(p.numel() for p in self.model.parameters())
-        print(f"     Model parameters / 模型参数数: {total_params:,}")
+        print(f" Model parameters / 模型参数数: {total_params:,}")
         
         # 3. 服务器初始化（层级约束版本）/ Server initialization (tier-constrained version)
         print("  [3/6] Initializing server with Tier-Constrained Gradient Sparsification...")
-        print("        初始化层级约束梯度稀疏化服务器...")
+        print("  初始化层级约束梯度稀疏化服务器...")
         self.server = FederatedServerWithGradientSparsification(
             model=self.model, 
             device=self.device,
@@ -563,8 +581,10 @@ Examples / 使用示例:
     
     # 数据集参数 / Dataset parameters
     parser.add_argument('--dataset', type=str, default='cifar10',
-                       choices=['mnist', 'fashion-mnist', 'cifar10', 'cifar100'],
-                       help='Dataset name / 数据集名称')
+                       choices=['mnist', 'fashion-mnist', 'cifar10', 'cifar100', 'mr', 'sst'],
+                       help='Dataset name / 数据集名称\n'
+                            '  Image: mnist, fashion-mnist, cifar10, cifar100\n'
+                            '  Text: mr (Movie Review), sst (Stanford Sentiment Treebank)')
     
     parser.add_argument('--num_clients', type=int, default=100,
                        help='Number of clients / 客户端数量')

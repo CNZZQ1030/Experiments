@@ -1,14 +1,13 @@
 """
-config.py - 层级约束动态梯度奖励配置（重构版）
-Configuration for Tier-Constrained Dynamic Gradient Reward (Refactored)
+config.py - 层级约束动态梯度奖励配置（扩展文本数据集版本 - 修正版）
+Configuration for Tier-Constrained Dynamic Gradient Reward (Extended with Text Datasets - Fixed)
 
 基于NeurIPS 2021论文"Gradient-Driven Rewards to Guarantee Fairness in Collaborative Machine Learning"
 Based on NeurIPS 2021 paper "Gradient-Driven Rewards to Guarantee Fairness in Collaborative Machine Learning"
 
-核心改进 / Core Improvements:
-1. 层级作为稀疏率的上下界 / Tiers as bounds for sparsification rates
-2. 组内插值实现连续映射 / Intra-tier interpolation for continuous mapping
-3. 大幅降低低贡献客户端的参数保留率 / Significantly reduce keep ratio for low-contribution clients
+修正说明 / Fix Notes:
+- 移除了 TEXT_CONFIG 中的 vocab_size，避免参数冲突
+- vocab_size 现在由数据加载器动态确定
 """
 
 import torch
@@ -161,16 +160,29 @@ class IncentiveConfig:
     VERBOSE_SPARSIFICATION = True  # 是否打印详细的稀疏化信息 / Print detailed sparsification info
 
 # =====================================
-# 数据集配置 / Dataset Configuration
+# 数据集配置（扩展版本）/ Dataset Configuration (Extended)
 # =====================================
 
 class DatasetConfig:
-    """数据集参数配置 / Dataset Parameters"""
+    """
+    数据集参数配置 - 扩展版本
+    Dataset Parameters - Extended Version
     
-    AVAILABLE_DATASETS = ["mnist", "fashion-mnist", "cifar10", "cifar100"]
+    新增支持 / New Support:
+    - mr: Movie Review 电影评论情感分析
+    - sst: Stanford Sentiment Treebank 斯坦福情感树库
+    """
+    
+    # 可用数据集列表 / Available datasets list
+    AVAILABLE_DATASETS = [
+        "mnist", "fashion-mnist", "cifar10", "cifar100",  # 图像数据集 / Image datasets
+        "mr", "sst"  # 文本数据集 / Text datasets (新增 / New)
+    ]
+    
     DATASET_NAME = "cifar10"
     DATA_ROOT = "./data"
     
+    # ===== 图像数据集归一化参数 / Image Dataset Normalization =====
     NORMALIZE_MEAN = {
         "mnist": (0.1307,),
         "fashion-mnist": (0.2860,),
@@ -185,27 +197,87 @@ class DatasetConfig:
         "cifar100": (0.2675, 0.2565, 0.2761)
     }
     
+    # ===== 输入形状 / Input Shape =====
     INPUT_SHAPE = {
         "mnist": (1, 28, 28),
         "fashion-mnist": (1, 28, 28),
         "cifar10": (3, 32, 32),
-        "cifar100": (3, 32, 32)
+        "cifar100": (3, 32, 32),
+        "mr": None,  # 文本数据，形状由模型决定 / Text data, shape determined by model
+        "sst": None  # 文本数据 / Text data
     }
     
+    # ===== 类别数量 / Number of Classes =====
     NUM_CLASSES = {
         "mnist": 10,
         "fashion-mnist": 10,
         "cifar10": 10,
-        "cifar100": 100
+        "cifar100": 100,
+        "mr": 2,  # 二分类：正面/负面 / Binary: positive/negative
+        "sst": 2  # 二分类：正面/负面 / Binary: positive/negative
     }
+    
+    # ===== 文本数据集特定参数 / Text Dataset Specific Parameters =====
+    # 重要：vocab_size 不在此配置，由数据加载器动态确定
+    # Important: vocab_size is NOT configured here, determined dynamically by data loader
+    TEXT_CONFIG = {
+        "mr": {
+            "embedding_dim": 128,
+            "max_seq_length": 200,
+            "filter_sizes": [3, 4, 5],  # TextCNN卷积核大小 / TextCNN filter sizes
+            "num_filters": 100,  # 每个卷积核的数量 / Number of filters per size
+            "dropout": 0.5
+        },
+        "sst": {
+            "embedding_dim": 128,
+            "max_seq_length": 200,
+            "filter_sizes": [3, 4, 5],
+            "num_filters": 100,
+            "dropout": 0.5
+        }
+    }
+    
+    @staticmethod
+    def is_text_dataset(dataset_name: str) -> bool:
+        """
+        判断是否为文本数据集 / Check if it's a text dataset
+        
+        Args:
+            dataset_name: 数据集名称 / Dataset name
+            
+        Returns:
+            bool: 是否为文本数据集 / Whether it's a text dataset
+        """
+        return dataset_name.lower() in ["mr", "sst"]
+    
+    @staticmethod
+    def get_text_config(dataset_name: str) -> dict:
+        """
+        获取文本数据集配置 / Get text dataset configuration
+        
+        Args:
+            dataset_name: 数据集名称 / Dataset name
+            
+        Returns:
+            dict: 文本数据集配置 / Text dataset configuration
+        """
+        if dataset_name.lower() in DatasetConfig.TEXT_CONFIG:
+            return DatasetConfig.TEXT_CONFIG[dataset_name.lower()].copy()  # 返回副本避免修改原配置
+        return {}
 
 # =====================================
-# 模型配置 / Model Configuration
+# 模型配置（扩展版本）/ Model Configuration (Extended)
 # =====================================
 
 class ModelConfig:
-    """模型参数配置 / Model Parameters"""
+    """
+    模型参数配置 - 扩展版本
+    Model Parameters - Extended Version
     
+    支持图像和文本模型 / Support both image and text models
+    """
+    
+    # ===== CNN配置（图像模型）/ CNN Configuration (Image Models) =====
     CNN_CHANNELS = [32, 64]
     CNN_KERNEL_SIZE = 3
     CNN_DROPOUT = 0.5
@@ -220,12 +292,17 @@ class ModelConfig:
         'last': 0.5    # 最后一层权重 / Last layer weight
     }
     
-    # 模型选择配置 / Model selection configuration
+    # ===== 模型选择配置 / Model Selection Configuration =====
     MODEL_TYPE = {
+        # 图像模型 / Image models
         "mnist": "simple_cnn",
         "fashion-mnist": "simple_cnn",
         "cifar10": "cifar_cnn",
-        "cifar100": "resnet18"
+        "cifar100": "resnet18",
+        
+        # 文本模型 / Text models (新增 / New)
+        "mr": "textcnn",
+        "sst": "textcnn"
     }
 
 # =====================================
