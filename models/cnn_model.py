@@ -607,7 +607,7 @@ class ModelFactory:
             return VGG11(num_classes=num_classes, input_channels=input_channels)
         
         # SST使用TextCNN
-        elif model_name in ['textcnn', 'sst']:
+        elif model_name in ['textcnn', 'sst', 'mr']:
             vocab_size = kwargs.pop('vocab_size', 20000)
             embedding_dim = kwargs.pop('embedding_dim', 128)
             filter_sizes = kwargs.pop('filter_sizes', [3, 4, 5])
@@ -691,7 +691,14 @@ class ModelFactory:
                 'embedding_dim': 128,
                 'max_seq_length': 200,
                 'num_classes': 2
-            }
+            },
+            'mr': {
+            'model_class': 'TextCNN',
+            'vocab_size': 20000,
+            'embedding_dim': 128,
+            'max_seq_length': 200,
+            'num_classes': 2
+        }
         }
         
         return info.get(model_name, {})
