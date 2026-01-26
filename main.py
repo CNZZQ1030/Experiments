@@ -1,6 +1,6 @@
 """
-main.py - 层级约束动态梯度奖励实验主程序（重构版）
-Main Program - Tier-Constrained Dynamic Gradient Reward Experiment (Refactored)
+main.py - 层级约束动态梯度奖励实验主程序（扩展版）
+Main Program - Tier-Constrained Dynamic Gradient Reward Experiment (Extended)
 
 基于NeurIPS 2021论文"Gradient-Driven Rewards to Guarantee Fairness in Collaborative Machine Learning"
 Based on NeurIPS 2021 paper "Gradient-Driven Rewards to Guarantee Fairness in Collaborative Machine Learning"
@@ -10,24 +10,35 @@ Based on NeurIPS 2021 paper "Gradient-Driven Rewards to Guarantee Fairness in Co
 2. 组内插值（Intra-Tier Interpolation）/ Intra-tier interpolation
 3. 大幅降低低贡献客户端的参数保留率以提高PCC / Significantly reduce keep ratio for low-contribution clients
 
+扩展功能 / Extended Features:
+✨ 支持4种Non-IID场景 / Support 4 Non-IID scenarios:
+   - IID: 均匀分布
+   - Non-IID Dirichlet: 标签分布倾斜
+   - Non-IID Size: 数据量不平衡
+   - Non-IID Class: 类别数不平衡
+
 修复说明 / Bug Fix:
 - 修复了梯度计算基准点的问题
 - 在步骤6中，客户端应用稀疏梯度后，立即更新服务器记录的client_previous_weights
 - 确保下一轮梯度计算：Δw_i = w_i^new - w_local_i^(应用稀疏梯度后)
 
 使用方法 / Usage:
-    # 基础实验 - CIFAR10 + Non-IID
+    # 基础实验 - CIFAR10 + Non-IID Dirichlet
     python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5
+    
+    # Non-IID Size Imbalanced (数据量不平衡)
+    python main.py --dataset cifar10 --distribution non-iid-size --size_imbalance_ratio 5.0
+    
+    # Non-IID Class Imbalanced (类别数不平衡)
+    python main.py --dataset cifar10 --distribution non-iid-class \
+                   --min_classes_per_client 2 --max_classes_per_client 5
     
     # 使用激进配置（更大差异化）
     python main.py --dataset cifar10 --tier_config aggressive
     
-    # 使用温和配置
-    python main.py --dataset cifar10 --tier_config moderate
-    
     # 完整参数示例
-    python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5 \\
-                   --num_clients 100 --num_rounds 100 --tier_config default \\
+    python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5 \
+                   --num_clients 100 --num_rounds 100 --tier_config default \
                    --sparsification_mode magnitude --aggregation_method contribution
 """
 
@@ -99,13 +110,20 @@ class TierConstrainedFederatedLearning:
         
         print(f"\n{'='*80}")
         print(f"Tier-Constrained Dynamic Gradient Reward Federated Learning")
-        print(f"层级约束动态梯度奖励联邦学习")
+        print(f"层级约束动态梯度奖励联邦学习 (扩展版 - 支持4种Non-IID场景)")
         print(f"{'='*80}")
         print(f"Experiment / 实验名称: {self.experiment_name}")
         print(f"Dataset / 数据集: {args.dataset}")
-        print(f"Distribution / 分布: {args.distribution}")
+        print(f"Distribution / 分布: {args.distribution.upper()}")
+        
+        # 根据不同的分布类型显示相应参数 / Show parameters based on distribution type
         if args.distribution == "non-iid-dir":
-            print(f"  Alpha: {args.alpha}")
+            print(f"  └─ Alpha (Dirichlet): {args.alpha}")
+        elif args.distribution == "non-iid-size":
+            print(f"  └─ Size Imbalance Ratio: {args.size_imbalance_ratio}")
+        elif args.distribution == "non-iid-class":
+            print(f"  └─ Classes per Client: {args.min_classes_per_client}-{args.max_classes_per_client}")
+        
         print(f"Clients / 客户端数: {args.num_clients}")
         print(f"Rounds / 轮次: {args.num_rounds}")
         print(f"Device / 设备: {self.device}")
@@ -139,8 +157,19 @@ class TierConstrainedFederatedLearning:
     def _generate_experiment_name(self) -> str:
         """生成实验名称 / Generate experiment name"""
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        dist_suffix = f"_a{self.args.alpha}" if self.args.distribution == "non-iid-dir" else ""
+        
+        # 根据不同分布类型生成后缀 / Generate suffix based on distribution type
+        if self.args.distribution == "non-iid-dir":
+            dist_suffix = f"_a{self.args.alpha}"
+        elif self.args.distribution == "non-iid-size":
+            dist_suffix = f"_ratio{self.args.size_imbalance_ratio}"
+        elif self.args.distribution == "non-iid-class":
+            dist_suffix = f"_classes{self.args.min_classes_per_client}-{self.args.max_classes_per_client}"
+        else:
+            dist_suffix = ""
+        
         tier_suffix = f"_TierConstrained_{self.args.tier_config}_{self.args.sparsification_mode}"
+        
         return f"{self.args.dataset}_{self.args.distribution}{dist_suffix}" \
                f"_c{self.args.num_clients}_r{self.args.num_rounds}{tier_suffix}_{timestamp}"
     
@@ -155,7 +184,10 @@ class TierConstrainedFederatedLearning:
             num_clients=self.args.num_clients,
             batch_size=self.args.batch_size,
             distribution=self.args.distribution,
-            alpha=self.args.alpha
+            alpha=self.args.alpha,
+            size_imbalance_ratio=self.args.size_imbalance_ratio,  # ✨ 新增
+            min_classes_per_client=self.args.min_classes_per_client,  # ✨ 新增
+            max_classes_per_client=self.args.max_classes_per_client  # ✨ 新增
         )
         
         # 2. 模型创建 / Model creation
@@ -189,11 +221,11 @@ class TierConstrainedFederatedLearning:
     
         # 打印模型信息 / Print model info
         total_params = sum(p.numel() for p in self.model.parameters())
-        print(f" Model parameters / 模型参数数: {total_params:,}")
+        print(f"     Model parameters / 模型参数数: {total_params:,}")
         
         # 3. 服务器初始化（层级约束版本）/ Server initialization (tier-constrained version)
         print("  [3/6] Initializing server with Tier-Constrained Gradient Sparsification...")
-        print("  初始化层级约束梯度稀疏化服务器...")
+        print("        初始化层级约束梯度稀疏化服务器...")
         self.server = FederatedServerWithGradientSparsification(
             model=self.model, 
             device=self.device,
@@ -511,6 +543,18 @@ class TierConstrainedFederatedLearning:
         else:
             tier_ranges = IncentiveConfig.TIER_KEEP_RATIO_RANGES
         
+        # ✨ 构建分布配置信息 / Build distribution configuration info
+        distribution_config = {
+            'type': self.args.distribution
+        }
+        if self.args.distribution == 'non-iid-dir':
+            distribution_config['alpha'] = self.args.alpha
+        elif self.args.distribution == 'non-iid-size':
+            distribution_config['size_imbalance_ratio'] = self.args.size_imbalance_ratio
+        elif self.args.distribution == 'non-iid-class':
+            distribution_config['min_classes_per_client'] = self.args.min_classes_per_client
+            distribution_config['max_classes_per_client'] = self.args.max_classes_per_client
+        
         save_data = {
             'experiment_name': self.experiment_name,
             'methodology': 'Tier-Constrained Dynamic Gradient Reward',
@@ -520,8 +564,7 @@ class TierConstrainedFederatedLearning:
                 'dataset': self.args.dataset,
                 'num_clients': self.args.num_clients,
                 'num_rounds': self.args.num_rounds,
-                'distribution': self.args.distribution,
-                'alpha': self.args.alpha,
+                'distribution_config': distribution_config,  # ✨ 新增
                 'rounds_per_slice': self.args.rounds_per_slice,
                 'local_epochs': self.args.local_epochs,
                 'batch_size': self.args.batch_size,
@@ -554,32 +597,75 @@ def parse_args():
     """解析命令行参数 / Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description='Tier-Constrained Dynamic Gradient Reward Federated Learning\n'
-                    '层级约束动态梯度奖励联邦学习',
+                    '层级约束动态梯度奖励联邦学习 (扩展版 - 支持4种Non-IID场景)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+✨ 扩展功能 - 支持4种Non-IID场景 / Extended - Support 4 Non-IID Scenarios:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣  IID (Independent and Identically Distributed / 独立同分布)
+   └─ 均匀随机分配数据，作为基准对比
+   
+2️⃣  Non-IID Dirichlet (Label Distribution Skew / 标签分布倾斜)
+   └─ 使用Dirichlet分布，通过alpha控制异质性程度
+   
+3️⃣  Non-IID Size (Quantity Skew / 数据量倾斜) ✨ 新增
+   └─ 客户端拥有不同数量的数据样本
+   
+4️⃣  Non-IID Class (Feature Distribution Skew / 类别数倾斜) ✨ 新增
+   └─ 客户端拥有不同数量的类别
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Examples / 使用示例:
-  # 基础实验 - MNIST + IID
-  python main.py --dataset mnist --distribution iid
-  
-  # Non-IID实验 - CIFAR10（默认配置）
-  python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5
-  
-  # 使用激进配置（更大差异化，适合提高PCC）
-  python main.py --dataset cifar10 --tier_config aggressive
-  
-  # 使用温和配置（更均衡的差异化）
-  python main.py --dataset cifar10 --tier_config moderate
-  
-  # 大规模实验
-  python main.py --dataset cifar10 --num_clients 100 --num_rounds 100 \\
-                 --tier_config default --sparsification_mode magnitude
-                 
-  # 对比实验 - 使用FedAvg聚合
-  python main.py --dataset cifar10 --aggregation_method fedavg
+
+【场景1: IID基准实验】
+python main.py --dataset cifar10 --distribution iid \\
+    --num_clients 100 --num_rounds 50
+
+【场景2: Non-IID Dirichlet - 标签分布倾斜】
+# 高度异质性 (alpha=0.1)
+python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.1 \\
+    --num_clients 100 --num_rounds 50
+
+# 中等异质性 (alpha=0.5，推荐)
+python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5 \\
+    --num_clients 100 --num_rounds 50
+
+【场景3: Non-IID Size - 数据量不平衡】✨ 新增
+python main.py --dataset cifar10 --distribution non-iid-size \\
+    --size_imbalance_ratio 5.0 --num_clients 100 --num_rounds 50
+
+【场景4: Non-IID Class - 类别数不平衡】✨ 新增
+python main.py --dataset cifar10 --distribution non-iid-class \\
+    --min_classes_per_client 2 --max_classes_per_client 5 \\
+    --num_clients 100 --num_rounds 50
+
+【对比实验: 不同层级配置】
+# 默认配置
+python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5 \\
+    --tier_config default
+
+# 激进配置 (更大差异化，适合提高PCC)
+python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5 \\
+    --tier_config aggressive
+
+# 温和配置 (更均衡)
+python main.py --dataset cifar10 --distribution non-iid-dir --alpha 0.5 \\
+    --tier_config moderate
+
+【完整参数示例】
+python main.py --dataset cifar10 --distribution non-iid-size \\
+    --size_imbalance_ratio 10.0 --num_clients 100 --num_rounds 100 \\
+    --tier_config aggressive --sparsification_mode magnitude \\
+    --aggregation_method contribution --local_epochs 5 \\
+    --learning_rate 0.01 --gradient_lr 1.0
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         """
     )
     
-    # 数据集参数 / Dataset parameters
+    # ==================== 数据集参数 / Dataset Parameters ====================
     parser.add_argument('--dataset', type=str, default='cifar10',
                        choices=['mnist', 'fashion-mnist', 'cifar10', 'cifar100', 'mr', 'sst'],
                        help='Dataset name / 数据集名称\n'
@@ -589,15 +675,35 @@ Examples / 使用示例:
     parser.add_argument('--num_clients', type=int, default=100,
                        help='Number of clients / 客户端数量')
     
-    # 数据分布 / Data distribution
+    # ==================== 数据分布参数 / Data Distribution Parameters ====================
     parser.add_argument('--distribution', type=str, default='non-iid-dir',
-                       choices=['iid', 'non-iid-dir'],
-                       help='Data distribution type / 数据分布类型')
+                       choices=['iid', 'non-iid-dir', 'non-iid-size', 'non-iid-class'],  # ✨ 扩展选项
+                       help='Data distribution type / 数据分布类型\n'
+                            '  - iid: 独立同分布 (基准)\n'
+                            '  - non-iid-dir: Dirichlet分布 (标签倾斜)\n'
+                            '  - non-iid-size: 数据量不平衡 ✨\n'
+                            '  - non-iid-class: 类别数不平衡 ✨')
     
+    # ===== Non-IID Dirichlet 参数 =====
     parser.add_argument('--alpha', type=float, default=0.5,
-                       help='Dirichlet alpha for non-iid / Non-IID的Dirichlet参数')
+                       help='Dirichlet alpha for non-iid-dir / Dirichlet参数\n'
+                            '  较小值(0.1)表示高度Non-IID，较大值(1.0)接近IID\n'
+                            '  Small (0.1): highly non-IID, Large (1.0): close to IID')
     
-    # 训练参数 / Training parameters
+    # ===== Non-IID Size 参数 ✨ 新增 =====
+    parser.add_argument('--size_imbalance_ratio', type=float, default=5.0,
+                       help='Size imbalance ratio for non-iid-size / 数据量不平衡比例 ✨\n'
+                            '  最大数据量与最小数据量的比例\n'
+                            '  Ratio of max to min data size (default: 5.0)')
+    
+    # ===== Non-IID Class 参数 ✨ 新增 =====
+    parser.add_argument('--min_classes_per_client', type=int, default=2,
+                       help='Minimum classes per client for non-iid-class / 每客户端最少类别数 ✨')
+    
+    parser.add_argument('--max_classes_per_client', type=int, default=5,
+                       help='Maximum classes per client for non-iid-class / 每客户端最多类别数 ✨')
+    
+    # ==================== 训练参数 / Training Parameters ====================
     parser.add_argument('--num_rounds', type=int, default=50,
                        help='Number of communication rounds / 通信轮次')
     
@@ -611,37 +717,37 @@ Examples / 使用示例:
                        help='Learning rate for local training / 本地训练学习率')
     
     parser.add_argument('--gradient_lr', type=float, default=1.0,
-                       help='Learning rate for applying sparse gradients / 稀疏梯度应用学习率（其实不该叫学习率，就是一个权重系数）')
+                       help='Learning rate for applying sparse gradients / 稀疏梯度应用学习率')
     
     parser.add_argument('--standalone_epochs', type=int, default=20,
                        help='Standalone training epochs / 独立训练轮次')
     
-    # 时间片参数 / Time slice parameters
+    # ==================== 时间片参数 / Time Slice Parameters ====================
     parser.add_argument('--rounds_per_slice', type=int, default=5,
                        help='Rounds per time slice / 每个时间片的轮次')
     
-    # 层级约束参数 / Tier-constrained parameters
+    # ==================== 层级约束参数 / Tier-Constrained Parameters ====================
     parser.add_argument('--tier_config', type=str, default='default',
                        choices=['default', 'aggressive', 'moderate'],
                        help='Tier configuration / 层级配置\n'
-                            '  default: Gold[0.8,1.0], Silver[0.5,0.8], Bronze[0.1,0.5]\n'
-                            '  aggressive: 更大差异化 / More differentiation\n'
-                            '  moderate: 更温和 / More moderate')
+                            '  - default: Gold[0.8,1.0], Silver[0.5,0.8], Bronze[0.1,0.5]\n'
+                            '  - aggressive: 更大差异化，适合提高PCC\n'
+                            '  - moderate: 更温和的差异化')
     
     parser.add_argument('--sparsification_mode', type=str, default='magnitude',
                        choices=['magnitude', 'random', 'structured'],
                        help='Sparsification mode / 稀疏化模式\n'
-                            '  magnitude: 基于幅度（推荐）\n'
-                            '  random: 随机\n'
-                            '  structured: 结构化')
+                            '  - magnitude: 基于幅度（推荐）\n'
+                            '  - random: 随机稀疏化\n'
+                            '  - structured: 结构化稀疏化')
     
     parser.add_argument('--aggregation_method', type=str, default='contribution',
                        choices=['fedavg', 'contribution'],
                        help='Aggregation method / 聚合方式\n'
-                            '  fedavg: 基于样本数量\n'
-                            '  contribution: 基于贡献度')
+                            '  - fedavg: 基于样本数量的FedAvg\n'
+                            '  - contribution: 基于贡献度的加权聚合（推荐）')
     
-    # 其他参数 / Other parameters
+    # ==================== 其他参数 / Other Parameters ====================
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed / 随机种子')
     
@@ -651,6 +757,27 @@ Examples / 使用示例:
 def main():
     """主函数 / Main function"""
     args = parse_args()
+    
+    # 打印配置摘要 / Print configuration summary
+    print(f"\n{'='*80}")
+    print(f"🚀 Experiment Configuration Summary / 实验配置摘要")
+    print(f"{'='*80}")
+    print(f"Dataset / 数据集: {args.dataset}")
+    print(f"Distribution / 数据分布: {args.distribution.upper()}")
+    
+    if args.distribution == 'non-iid-dir':
+        print(f"  └─ Dirichlet Alpha: {args.alpha}")
+    elif args.distribution == 'non-iid-size':
+        print(f"  └─ Size Imbalance Ratio: {args.size_imbalance_ratio}")
+    elif args.distribution == 'non-iid-class':
+        print(f"  └─ Classes per Client: [{args.min_classes_per_client}, {args.max_classes_per_client}]")
+    
+    print(f"Clients / 客户端: {args.num_clients}")
+    print(f"Rounds / 轮次: {args.num_rounds}")
+    print(f"Tier Config / 层级配置: {args.tier_config}")
+    print(f"Sparsification / 稀疏化: {args.sparsification_mode}")
+    print(f"Aggregation / 聚合: {args.aggregation_method}")
+    print(f"{'='*80}\n")
     
     # 运行实验 / Run experiment
     experiment = TierConstrainedFederatedLearning(args)
